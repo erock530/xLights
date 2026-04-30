@@ -527,6 +527,7 @@ void AudioManager::DoPrepareFrameData() {
         frames++;
     }
     int totalsamples = frames * samplesperframe;
+    int const analysissamples = std::min<long>(_trackSize, totalsamples);
 
     spdlog::info("    Length {}ms", _lengthMS);
     spdlog::info("    Interval {}ms", _intervalMS);
@@ -542,6 +543,7 @@ void AudioManager::DoPrepareFrameData() {
 
     size_t step = 2048;
     float* pdata[2];
+    bool warnedNullRawPointer = false;
 
     int pos = 0;
     std::vector<float> spectrogram;
@@ -558,14 +560,20 @@ void AudioManager::DoPrepareFrameData() {
         // clear the data if we are about to get new data ... dont clear it if we wont
         // this happens because the spectrogram function has a fixed window based on the parameters we set and it
         // does not match our time slices exactly so we have to select which one to use
-        if (pos < i * samplesperframe + samplesperframe && pos + (int)step < totalsamples) {
+        if (pos < i * samplesperframe + samplesperframe && pos + (int)step < analysissamples) {
             spectrogram.clear();
         }
 
         // only get the data if we are not ahead of the music
-        while (pos < i * samplesperframe + samplesperframe && pos + (int)step < totalsamples) {
+        while (pos < i * samplesperframe + samplesperframe && pos + (int)step < analysissamples) {
             pdata[0] = GetRawLeftDataPtr(pos);
-            assert(pdata[0] != nullptr);
+            if (pdata[0] == nullptr) {
+                if (!warnedNullRawPointer) {
+                    spdlog::warn("DoPrepareFrameData: raw left-channel pointer is null at sample {}. Spectrogram for remaining windows will be empty.", pos);
+                    warnedNullRawPointer = true;
+                }
+                break;
+            }
             pdata[1] = GetRawRightDataPtr(pos);
             float max2 = 0;
 
@@ -1748,7 +1756,7 @@ float* AudioManager::GetRawLeftDataPtr(long offset) {
 
     FilteredAudioData* fad = GetFilteredAudioData(AUDIOSAMPLETYPE::RAW, -1, -1);
 
-    if (fad != nullptr && offset <= _trackSize)
+    if (fad != nullptr && fad->data0 != nullptr && offset <= _trackSize)
         return &fad->data0[offset];
     return nullptr;
 }

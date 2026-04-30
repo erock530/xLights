@@ -39,5 +39,10 @@ public:
 
     [[nodiscard]] AIImageGenerator* createAIImageGenerator() const override;
 
+    [[nodiscard]] AIMusicEffectPlan GenerateMusicEffectPlan(
+        const AIMusicAnalysis& analysis,
+        const std::vector<MappingModelInfo>& targets,
+        const AIMusicGenerationOptions& options) const override;
+
     [[nodiscard]] AILyricTrack GenerateLyricTrack(const std::string& audioPath) const override;
 };

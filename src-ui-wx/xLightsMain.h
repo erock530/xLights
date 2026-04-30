@@ -214,6 +214,7 @@ wxDECLARE_EVENT(EVT_SHOW_SELECT_EFFECTS, wxCommandEvent);
 wxDECLARE_EVENT(EVT_IMPORT_TIMING, wxCommandEvent);
 wxDECLARE_EVENT(EVT_IMPORT_NOTES, wxCommandEvent);
 wxDECLARE_EVENT(EVT_AI_LYRICS, wxCommandEvent);
+wxDECLARE_EVENT(EVT_AI_MUSIC_EFFECTS, wxCommandEvent);
 wxDECLARE_EVENT(EVT_CONVERT_DATA_TO_EFFECTS, wxCommandEvent);
 wxDECLARE_EVENT(EVT_PROMOTE_EFFECTS, wxCommandEvent);
 wxDECLARE_EVENT(EVT_APPLYLAST, wxCommandEvent);
@@ -830,6 +831,7 @@ public:
     static const wxWindowID ID_MENUITEM_GenerateCustomModel;
     static const wxWindowID ID_MNU_REMAPCUSTOM;
     static const wxWindowID ID_MENUITEM_GenerateAIImage;
+    static const wxWindowID ID_MNU_GENERATE_AI_MUSIC_EFFECTS;
     static const wxWindowID ID_MNU_GENERATELYRICS;
     static const wxWindowID ID_MENUITEM_CONVERT;
     static const wxWindowID ID_MNU_PREPAREAUDIO;
@@ -1059,6 +1061,7 @@ public:
     wxMenuItem* MenuItem_ViewZoomOut;
     wxMenuItem* MenuItem_Zoom;
     wxMenuItem* Menu_GenerateAIImage;
+    wxMenuItem* MenuItem_GenerateAIMusicEffects;
     wxMenuItem* Menu_GenerateCustomModel;
     wxMenuItem* Menu_Settings_Sequence;
     wxMenuItem* QuitMenuItem;
@@ -1653,6 +1656,7 @@ public:
     void ExecuteImportTimingElement(wxCommandEvent &command);
     void ExecuteImportNotes(wxCommandEvent &command);
     void GenerateAILyrics(wxCommandEvent& command);
+    void GenerateAIMusicEffects(wxCommandEvent& command);
     void ConvertDataRowToEffects(wxCommandEvent &command);
     void DoConvertDataRowToEffects(EffectLayer *layer, xlColorVector &colors, int frameTime, bool eraseExisting);
     void PromoteEffects(wxCommandEvent &command);

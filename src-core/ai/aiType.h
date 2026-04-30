@@ -16,7 +16,8 @@ namespace aiType {
 		COLORPALETTES = 0x0001,
         IMAGES = 0x0002,
         MAPPING = 0x0003,
-        SPEECH2TEXT = 0x0004
+        SPEECH2TEXT = 0x0004,
+        MUSIC2EFFECTS = 0x0005
 	};
 
     inline const char* TypeName(TYPE t) {
@@ -26,6 +27,7 @@ namespace aiType {
             case IMAGES: return "Images";
             case MAPPING: return "Mapping";
             case SPEECH2TEXT: return "Speech to Text";
+            case MUSIC2EFFECTS: return "Music to Effects";
             default: break;
         }
         return "Unknown";
@@ -38,6 +40,7 @@ namespace aiType {
             case IMAGES: return "Images";
             case MAPPING: return "Mapping";
             case SPEECH2TEXT: return "Speech2Text";
+            case MUSIC2EFFECTS: return "Music2Effects";
             default: break;
         }
         return "Unknown";

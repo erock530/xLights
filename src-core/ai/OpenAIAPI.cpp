@@ -181,6 +181,151 @@ aiBase::AIColorPalette OpenAIAPI::GenerateColorPalette(const std::string& prompt
     return ret;
 }
 
+aiBase::AIMusicEffectPlan OpenAIAPI::GenerateMusicEffectPlan(
+    const AIMusicAnalysis& analysis,
+    const std::vector<MappingModelInfo>& targets,
+    const AIMusicGenerationOptions& options) const {
+    AIMusicEffectPlan plan;
+    if (token.empty()) {
+        plan.error = "You must set a " + GetLLMName() + " Bearer Token in the Preferences on the Services Panel";
+        return plan;
+    }
+    if (targets.empty()) {
+        plan.error = "No effect targets were provided.";
+        return plan;
+    }
+
+    nlohmann::json analysisJson;
+    analysisJson["startMS"] = analysis.startMS;
+    analysisJson["endMS"] = analysis.endMS;
+    analysisJson["bpm"] = analysis.bpm;
+    analysisJson["beatMS"] = analysis.beatMS;
+    analysisJson["downbeatMS"] = analysis.downbeatMS;
+    analysisJson["sectionMS"] = analysis.sectionMS;
+    analysisJson["energy"] = analysis.energy;
+    analysisJson["onsetDensity"] = analysis.onsetDensity;
+
+    nlohmann::json targetJson = nlohmann::json::array();
+    for (const auto& t : targets) {
+        targetJson.push_back({
+            { "name", t.name },
+            { "type", t.type },
+            { "modelClass", t.modelClass },
+            { "nodeCount", t.nodeCount },
+            { "width", t.width },
+            { "height", t.height }
+        });
+    }
+
+    nlohmann::json optionsJson;
+    optionsJson["style"] = options.style;
+    optionsJson["intensity"] = options.intensity;
+    optionsJson["density"] = options.density;
+    optionsJson["allowedEffects"] = options.allowedEffects;
+    optionsJson["overwritePolicy"] = options.overwritePolicy;
+    optionsJson["startMS"] = options.startMS;
+    optionsJson["endMS"] = options.endMS;
+
+    std::string prompt =
+        "You are generating xLights effect plans. Return JSON only.\n"
+        "JSON schema:\n"
+        "{"
+        "\"blocks\": ["
+        "{"
+        "\"targetName\": \"string\","
+        "\"layerHint\": 0,"
+        "\"effectName\": \"On|Color Wash|Bars|VUMeter\","
+        "\"startMS\": 0,"
+        "\"endMS\": 1000,"
+        "\"settings\": {\"key\": \"value\"},"
+        "\"palette\": \"optional palette string\","
+        "\"confidence\": 0.0,"
+        "\"reason\": \"short reason\","
+        "\"priority\": 0"
+        "}"
+        "],"
+        "\"warnings\": [\"string\"]"
+        "}\n"
+        "Rules:\n"
+        "- Use only provided targets.\n"
+        "- Keep all blocks within requested startMS/endMS.\n"
+        "- Ensure endMS > startMS.\n"
+        "- Prefer simple settings and leave settings empty if unknown.\n"
+        "- Do not include markdown fences.\n"
+        "Analysis JSON:\n" + analysisJson.dump() +
+        "\nTargets JSON:\n" + targetJson.dump() +
+        "\nOptions JSON:\n" + optionsJson.dump();
+
+    auto [response, ok] = CallLLM(prompt);
+    if (!ok) {
+        plan.error = response;
+        return plan;
+    }
+
+    auto trimJsonEnvelope = [](std::string s) {
+        if (StartsWith(s, "```")) {
+            auto firstNewline = s.find('\n');
+            if (firstNewline != std::string::npos) {
+                s = s.substr(firstNewline + 1);
+            }
+            auto fence = s.rfind("```");
+            if (fence != std::string::npos) {
+                s = s.substr(0, fence);
+            }
+        }
+        return Trim(s);
+    };
+
+    try {
+        nlohmann::json root = nlohmann::json::parse(trimJsonEnvelope(response));
+        if (!root.contains("blocks") || !root["blocks"].is_array()) {
+            plan.error = "AI response did not include a valid blocks array.";
+            return plan;
+        }
+        if (root.contains("warnings") && root["warnings"].is_array()) {
+            for (const auto& w : root["warnings"]) {
+                if (w.is_string()) {
+                    plan.warnings.push_back(w.get<std::string>());
+                }
+            }
+        }
+
+        for (const auto& b : root["blocks"]) {
+            if (!b.is_object()) {
+                continue;
+            }
+            AIEffectBlock block;
+            block.targetName = b.value("targetName", "");
+            block.layerHint = b.value("layerHint", -1);
+            block.effectName = b.value("effectName", "");
+            block.startMS = b.value("startMS", 0);
+            block.endMS = b.value("endMS", 0);
+            block.palette = b.value("palette", "");
+            block.confidence = b.value("confidence", 0.0F);
+            block.reason = b.value("reason", "");
+            block.priority = b.value("priority", 0);
+
+            if (b.contains("settings") && b["settings"].is_object()) {
+                for (auto it = b["settings"].begin(); it != b["settings"].end(); ++it) {
+                    if (it.value().is_string()) {
+                        block.settings[it.key()] = it.value().get<std::string>();
+                    } else {
+                        block.settings[it.key()] = it.value().dump();
+                    }
+                }
+            }
+
+            if (!block.targetName.empty() && !block.effectName.empty()) {
+                plan.blocks.push_back(std::move(block));
+            }
+        }
+    } catch (const std::exception& ex) {
+        plan.error = std::string("Failed parsing AI music effects plan: ") + ex.what();
+    }
+
+    return plan;
+}
+
 aiBase::AIImageGenerator* OpenAIAPI::createAIImageGenerator() const {
     return new OpenAIImageGenerator(base_url, token, image_model);
 }

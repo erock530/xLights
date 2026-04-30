@@ -11,6 +11,9 @@ Issue Tracker is found here: www.github.com/xLightsSequencer/xLights/issues
 XLIGHTS/NUTCRACKER RELEASE NOTES
 ---------------------------------
 2026.08  May ??, 2026
+    -enh (erock530)             Sequencer timing-row menu now includes "Generate AI Music Effects..." to build a
+                                previewable music-to-effects plan for selected/all models with undo-safe insertion
+                                and deterministic fallback when no AI planner is available.
     -enh (dkulp)                macOS: MetricKit collector subscribes at launch (macOS 12+) and writes hang / CPU /
                                 disk-write / crash diagnostics + daily metrics as JSON into a Diagnostics/ folder
                                 next to xLights_spdlog.log. Whatever has accumulated since the last submission is

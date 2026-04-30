@@ -166,6 +166,60 @@ public:
         std::string error;
     };
 
+    struct AIMusicAnalysis {
+        int startMS = 0;
+        int endMS = 0;
+        double bpm = 0.0;
+        std::vector<int> beatMS;
+        std::vector<int> downbeatMS;
+        std::vector<int> sectionMS;
+        std::vector<float> energy;
+        std::vector<float> onsetDensity;
+    };
+
+    struct AIEffectTarget {
+        std::string targetName;
+        std::string targetType;
+        std::vector<std::string> roleTags;
+    };
+
+    struct AIEffectBlock {
+        std::string targetName;
+        int layerHint = -1;
+        std::string effectName;
+        int startMS = 0;
+        int endMS = 0;
+        std::map<std::string, std::string> settings;
+        std::string palette;
+        float confidence = 0.0F;
+        std::string reason;
+        int priority = 0;
+    };
+
+    struct AIMusicEffectPlan {
+        std::vector<AIEffectBlock> blocks;
+        std::vector<std::string> warnings;
+        std::string error;
+    };
+
+    struct AIMusicGenerationOptions {
+        std::string style;
+        std::string intensity = "Medium";
+        std::string density = "Normal";
+        std::vector<std::string> allowedEffects;
+        std::string overwritePolicy = "new_layer";
+        int startMS = 0;
+        int endMS = 0;
+    };
+
+    [[nodiscard]] virtual AIMusicEffectPlan GenerateMusicEffectPlan(
+        const AIMusicAnalysis& analysis,
+        const std::vector<MappingModelInfo>& targets,
+        const AIMusicGenerationOptions& options) const {
+        AIMusicEffectPlan plan;
+        plan.error = "This AI service does not support music-to-effects generation.";
+        return plan;
+    }
 
     [[nodiscard]] virtual AILyricTrack GenerateLyricTrack(const std::string& audioPath) const {
         return {};

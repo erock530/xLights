@@ -307,6 +307,7 @@ const wxWindowID xLightsFrame::ID_MENU_GENERATE2DPATH = wxNewId();
 const wxWindowID xLightsFrame::ID_MENUITEM_GenerateCustomModel = wxNewId();
 const wxWindowID xLightsFrame::ID_MNU_REMAPCUSTOM = wxNewId();
 const wxWindowID xLightsFrame::ID_MENUITEM_GenerateAIImage = wxNewId();
+const wxWindowID xLightsFrame::ID_MNU_GENERATE_AI_MUSIC_EFFECTS = wxNewId();
 const wxWindowID xLightsFrame::ID_MNU_GENERATELYRICS = wxNewId();
 const wxWindowID xLightsFrame::ID_MENUITEM_CONVERT = wxNewId();
 const wxWindowID xLightsFrame::ID_MNU_PREPAREAUDIO = wxNewId();
@@ -445,6 +446,7 @@ wxDEFINE_EVENT(EVT_SHOW_SELECTED_EFFECTS, wxCommandEvent);
 wxDEFINE_EVENT(EVT_IMPORT_TIMING, wxCommandEvent);
 wxDEFINE_EVENT(EVT_IMPORT_NOTES, wxCommandEvent);
 wxDEFINE_EVENT(EVT_AI_LYRICS, wxCommandEvent);
+wxDEFINE_EVENT(EVT_AI_MUSIC_EFFECTS, wxCommandEvent);
 wxDEFINE_EVENT(EVT_CONVERT_DATA_TO_EFFECTS, wxCommandEvent);
 wxDEFINE_EVENT(EVT_PROMOTE_EFFECTS, wxCommandEvent);
 wxDEFINE_EVENT(EVT_RGBEFFECTS_CHANGED, wxCommandEvent);
@@ -505,6 +507,7 @@ EVT_COMMAND(wxID_ANY, EVT_SHOW_SELECTED_EFFECTS, xLightsFrame::ShowHideSelectEff
 EVT_COMMAND(wxID_ANY, EVT_IMPORT_TIMING, xLightsFrame::ExecuteImportTimingElement)
 EVT_COMMAND(wxID_ANY, EVT_IMPORT_NOTES, xLightsFrame::ExecuteImportNotes)
 EVT_COMMAND(wxID_ANY, EVT_AI_LYRICS, xLightsFrame::GenerateAILyrics)
+EVT_COMMAND(wxID_ANY, EVT_AI_MUSIC_EFFECTS, xLightsFrame::GenerateAIMusicEffects)
 EVT_COMMAND(wxID_ANY, EVT_CONVERT_DATA_TO_EFFECTS, xLightsFrame::ConvertDataRowToEffects)
 EVT_COMMAND(wxID_ANY, EVT_PROMOTE_EFFECTS, xLightsFrame::PromoteEffects)
 EVT_COMMAND(wxID_ANY, EVT_APPLYLAST, xLightsFrame::ApplyLast)
@@ -1135,6 +1138,8 @@ xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderO
     Menu1->Append(MenuItem_RemapCustom);
     Menu_GenerateAIImage = new wxMenuItem(Menu1, ID_MENUITEM_GenerateAIImage, _("Generate AI Image"), _("Create images using AI - if configured."), wxITEM_NORMAL);
     Menu1->Append(Menu_GenerateAIImage);
+    MenuItem_GenerateAIMusicEffects = new wxMenuItem(Menu1, ID_MNU_GENERATE_AI_MUSIC_EFFECTS, _("Generate AI Music Effects..."), _("Create coordinated effects from music structure."), wxITEM_NORMAL);
+    Menu1->Append(MenuItem_GenerateAIMusicEffects);
     MenuItem_GenerateLyrics = new wxMenuItem(Menu1, ID_MNU_GENERATELYRICS, _("Generate &Lyrics From Data"), _("Generate lyric phenomes from data"), wxITEM_NORMAL);
     Menu1->Append(MenuItem_GenerateLyrics);
     MenuItemConvert = new wxMenuItem(Menu1, ID_MENUITEM_CONVERT, _("&Convert"), wxEmptyString, wxITEM_NORMAL);
@@ -1403,6 +1408,7 @@ xLightsFrame::xLightsFrame(wxWindow* parent, int ab, wxWindowID id, bool renderO
     Connect(ID_MENUITEM_GenerateCustomModel, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenu_GenerateCustomModelSelected);
     Connect(ID_MNU_REMAPCUSTOM, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_RemapCustomSelected);
     Connect(ID_MENUITEM_GenerateAIImage, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_GenerateAIImageSelected);
+    Connect(ID_MNU_GENERATE_AI_MUSIC_EFFECTS, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::GenerateAIMusicEffects);
     Connect(ID_MNU_GENERATELYRICS, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_GenerateLyricsSelected);
     Connect(ID_MENUITEM_CONVERT, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItemConvertSelected);
     Connect(ID_MNU_PREPAREAUDIO, wxEVT_COMMAND_MENU_SELECTED, (wxObjectEventFunction)&xLightsFrame::OnMenuItem_PrepareAudioSelected);

@@ -8,7 +8,11 @@
  * License: https://github.com/xLightsSequencer/xLights/blob/master/License.txt
  **************************************************************/
 
-#include <map>
+ #include <algorithm>
+ #include <cctype>
+ #include <functional>
+ #include <map>
+ #include <set>
 
 #include <wx/utils.h>
 #include <wx/tokenzr.h>
@@ -16,6 +20,13 @@
 #include <wx/filename.h>
 #include <wx/filepicker.h>
 #include <wx/fontpicker.h>
+#include <wx/dialog.h>
+#include <wx/button.h>
+#include <wx/checkbox.h>
+#include <wx/choice.h>
+#include <wx/sizer.h>
+#include <wx/stattext.h>
+#include <wx/textctrl.h>
 #include "settings/XLightsConfigAdapter.h"
 #include <wx/textfile.h>
 
@@ -66,6 +77,8 @@
 #include "UtilFunctions.h"
 #include "utils/ExternalHooks.h"
 #include "models/ModelGroup.h"
+#include "media/TempoDetector.h"
+#include "media/OnsetDetector.h"
 
 #include "ai/aiType.h"
 #include "ai/aiBase.h"
@@ -73,6 +86,371 @@
 
 #include <log.h>
 
+namespace {
+
+    struct MusicGenerationRuntimeData {
+        aiBase::AIMusicAnalysis analysis;
+        aiBase::AIMusicGenerationOptions options;
+        std::vector<ModelElement*> targets;
+        std::vector<aiBase::MappingModelInfo> targetInfos;
+        int regenerationCount = 0;
+    };
+    
+    class AIMusicEffectsDialog : public wxDialog {
+    public:
+        AIMusicEffectsDialog(wxWindow* parent, const std::vector<aiBase*>& services, bool hasSelectionRange)
+            : wxDialog(parent, wxID_ANY, "Generate AI Music Effects", wxDefaultPosition, wxSize(700, 650), wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
+        {
+            auto* rootSizer = new wxBoxSizer(wxVERTICAL);
+            auto* grid = new wxFlexGridSizer(2, 6, 8);
+            grid->AddGrowableCol(1, 1);
+    
+            wxArrayString serviceChoices;
+            serviceChoices.push_back("Deterministic (Offline)");
+            for (auto* s : services) {
+                serviceChoices.push_back(s->GetLLMName());
+            }
+            ServiceChoice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, serviceChoices);
+            ServiceChoice->SetSelection(0);
+            AddLabeledControl(grid, "Planner", ServiceChoice);
+    
+            StyleText = new wxTextCtrl(this, wxID_ANY, "Energetic, coordinated holiday look");
+            AddLabeledControl(grid, "Style Prompt", StyleText);
+    
+            wxArrayString scopeChoices;
+            scopeChoices.push_back("Selected models only");
+            scopeChoices.push_back("Selected groups only");
+            scopeChoices.push_back("Whole display set");
+            ScopeChoice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, scopeChoices);
+            ScopeChoice->SetSelection(0);
+            AddLabeledControl(grid, "Target Scope", ScopeChoice);
+    
+            wxArrayString intensityChoices;
+            intensityChoices.push_back("Low");
+            intensityChoices.push_back("Medium");
+            intensityChoices.push_back("High");
+            IntensityChoice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, intensityChoices);
+            IntensityChoice->SetSelection(1);
+            AddLabeledControl(grid, "Intensity", IntensityChoice);
+    
+            wxArrayString densityChoices;
+            densityChoices.push_back("Sparse");
+            densityChoices.push_back("Normal");
+            densityChoices.push_back("Busy");
+            DensityChoice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, densityChoices);
+            DensityChoice->SetSelection(1);
+            AddLabeledControl(grid, "Density", DensityChoice);
+    
+            wxArrayString paletteChoices;
+            paletteChoices.push_back("Use existing palette");
+            paletteChoices.push_back("AI generated palette");
+            paletteChoices.push_back("Auto from style");
+            PaletteChoice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, paletteChoices);
+            PaletteChoice->SetSelection(2);
+            AddLabeledControl(grid, "Palette Source", PaletteChoice);
+    
+            wxArrayString layerChoices;
+            layerChoices.push_back("New layer");
+            layerChoices.push_back("Merge in open spaces");
+            layerChoices.push_back("Overwrite selected time range");
+            LayerPolicyChoice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, layerChoices);
+            LayerPolicyChoice->SetSelection(0);
+            AddLabeledControl(grid, "Layer Policy", LayerPolicyChoice);
+    
+            wxArrayString rangeChoices;
+            rangeChoices.push_back("Whole song");
+            rangeChoices.push_back("Selection only");
+            TimeRangeChoice = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, rangeChoices);
+            TimeRangeChoice->SetSelection(0);
+            TimeRangeChoice->Enable(hasSelectionRange);
+            AddLabeledControl(grid, "Time Range", TimeRangeChoice);
+    
+            rootSizer->Add(grid, 0, wxEXPAND | wxALL, 10);
+    
+            auto* timingTracksRow = new wxBoxSizer(wxHORIZONTAL);
+            CreateBeatTrack = new wxCheckBox(this, wxID_ANY, "Create AI_Beat timing track");
+            CreateDownbeatTrack = new wxCheckBox(this, wxID_ANY, "Create AI_Downbeat timing track");
+            CreateSectionTrack = new wxCheckBox(this, wxID_ANY, "Create AI_Section timing track");
+            timingTracksRow->Add(CreateBeatTrack, 0, wxRIGHT, 10);
+            timingTracksRow->Add(CreateDownbeatTrack, 0, wxRIGHT, 10);
+            timingTracksRow->Add(CreateSectionTrack, 0, 0, 0);
+            rootSizer->Add(timingTracksRow, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+    
+            rootSizer->Add(new wxStaticText(this, wxID_ANY, "Preview"), 0, wxLEFT | wxRIGHT, 10);
+            PreviewText = new wxTextCtrl(this, wxID_ANY, "",
+                                         wxDefaultPosition, wxSize(-1, 260),
+                                         wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
+            rootSizer->Add(PreviewText, 1, wxEXPAND | wxALL, 10);
+    
+            auto* buttonRow = new wxBoxSizer(wxHORIZONTAL);
+            GenerateButton = new wxButton(this, wxID_ANY, "Generate Plan");
+            RegenerateButton = new wxButton(this, wxID_ANY, "Regenerate");
+            ApplyButton = new wxButton(this, wxID_ANY, "Apply");
+            auto* cancelButton = new wxButton(this, wxID_CANCEL, "Cancel");
+            RegenerateButton->Enable(false);
+            ApplyButton->Enable(false);
+            buttonRow->Add(GenerateButton, 0, wxRIGHT, 8);
+            buttonRow->Add(RegenerateButton, 0, wxRIGHT, 8);
+            buttonRow->AddStretchSpacer(1);
+            buttonRow->Add(ApplyButton, 0, wxRIGHT, 8);
+            buttonRow->Add(cancelButton, 0, 0, 0);
+            rootSizer->Add(buttonRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+    
+            SetSizerAndFit(rootSizer);
+            CentreOnParent();
+        }
+    
+        int GetSelectedServiceIndex() const { return ServiceChoice->GetSelection(); }
+        std::string GetStylePrompt() const { return Trim(StyleText->GetValue().ToStdString()); }
+        std::string GetScope() const { return ScopeChoice->GetStringSelection().ToStdString(); }
+        std::string GetIntensity() const { return IntensityChoice->GetStringSelection().ToStdString(); }
+        std::string GetDensity() const { return DensityChoice->GetStringSelection().ToStdString(); }
+        std::string GetLayerPolicy() const { return LayerPolicyChoice->GetStringSelection().ToStdString(); }
+        std::string GetTimeRange() const { return TimeRangeChoice->GetStringSelection().ToStdString(); }
+    
+        bool ShouldCreateBeatTrack() const { return CreateBeatTrack->IsChecked(); }
+        bool ShouldCreateDownbeatTrack() const { return CreateDownbeatTrack->IsChecked(); }
+        bool ShouldCreateSectionTrack() const { return CreateSectionTrack->IsChecked(); }
+    
+        wxButton* GetGenerateButton() const { return GenerateButton; }
+        wxButton* GetRegenerateButton() const { return RegenerateButton; }
+        wxButton* GetApplyButton() const { return ApplyButton; }
+    
+        void SetPreviewText(const wxString& text) { PreviewText->SetValue(text); }
+        void SetPlanReady(bool ready) {
+            ApplyButton->Enable(ready);
+            RegenerateButton->Enable(ready);
+        }
+    
+    private:
+        static void AddLabeledControl(wxFlexGridSizer* grid, const wxString& label, wxWindow* control)
+        {
+            grid->Add(new wxStaticText(control->GetParent(), wxID_ANY, label), 0, wxALIGN_CENTER_VERTICAL);
+            grid->Add(control, 1, wxEXPAND);
+        }
+    
+        wxChoice* ServiceChoice = nullptr;
+        wxTextCtrl* StyleText = nullptr;
+        wxChoice* ScopeChoice = nullptr;
+        wxChoice* IntensityChoice = nullptr;
+        wxChoice* DensityChoice = nullptr;
+        wxChoice* PaletteChoice = nullptr;
+        wxChoice* LayerPolicyChoice = nullptr;
+        wxChoice* TimeRangeChoice = nullptr;
+        wxCheckBox* CreateBeatTrack = nullptr;
+        wxCheckBox* CreateDownbeatTrack = nullptr;
+        wxCheckBox* CreateSectionTrack = nullptr;
+        wxTextCtrl* PreviewText = nullptr;
+        wxButton* GenerateButton = nullptr;
+        wxButton* RegenerateButton = nullptr;
+        wxButton* ApplyButton = nullptr;
+    };
+    
+    aiBase::AIMusicAnalysis BuildDeterministicMusicAnalysis(AudioManager* media, int startMS, int endMS, int frameMS)
+    {
+        aiBase::AIMusicAnalysis analysis;
+        analysis.startMS = startMS;
+        analysis.endMS = endMS;
+        analysis.bpm = 0.0;
+    
+        if (media != nullptr) {
+            TempoResult tempo = DetectTempo(media);
+            if (tempo.bpm > 0.0f && !tempo.beatMS.empty()) {
+                analysis.bpm = tempo.bpm;
+                for (auto beat : tempo.beatMS) {
+                    if (beat >= startMS && beat < endMS) {
+                        analysis.beatMS.push_back(static_cast<int>(beat));
+                    }
+                }
+            }
+    
+            std::vector<long> onsets = DetectOnsets(media);
+            if (!onsets.empty()) {
+                for (auto onset : onsets) {
+                    if (onset >= startMS && onset < endMS) {
+                        analysis.onsetDensity.push_back(1.0F);
+                    }
+                }
+            }
+        }
+    
+        if (analysis.beatMS.empty()) {
+            const int beatSpacingMS = std::max(frameMS, 500);
+            for (int t = startMS; t < endMS; t += beatSpacingMS) {
+                analysis.beatMS.push_back(t);
+            }
+            analysis.bpm = 60000.0 / static_cast<double>(std::max(frameMS, 500));
+        }
+    
+        for (size_t i = 0; i < analysis.beatMS.size(); ++i) {
+            if ((i % 4) == 0) {
+                analysis.downbeatMS.push_back(analysis.beatMS[i]);
+            }
+        }
+        if (analysis.downbeatMS.empty() && !analysis.beatMS.empty()) {
+            analysis.downbeatMS.push_back(analysis.beatMS.front());
+        }
+    
+        for (size_t i = 0; i < analysis.downbeatMS.size(); i += 4) {
+            analysis.sectionMS.push_back(analysis.downbeatMS[i]);
+        }
+        if (analysis.sectionMS.empty() || analysis.sectionMS.back() != endMS) {
+            analysis.sectionMS.push_back(endMS);
+        }
+    
+        const int sampleCount = std::max(8, (endMS - startMS) / std::max(frameMS * 4, 1));
+        analysis.energy.reserve(sampleCount);
+        if (analysis.onsetDensity.empty()) {
+            analysis.onsetDensity.reserve(sampleCount);
+        }
+        for (int i = 0; i < sampleCount; ++i) {
+            const float phase = static_cast<float>(i) / static_cast<float>(sampleCount);
+            const float shaped = 0.5F * (1.0F + std::sin(phase * 6.2831853F - 1.5707963F));
+            analysis.energy.push_back(0.2F + 0.8F * shaped);
+            if (analysis.onsetDensity.size() < static_cast<size_t>(sampleCount)) {
+                analysis.onsetDensity.push_back(0.25F + 0.75F * (1.0F - shaped));
+            }
+        }
+    
+        return analysis;
+    }
+    
+    std::vector<aiBase::AIEffectBlock> BuildDeterministicBlocks(const MusicGenerationRuntimeData& runtime)
+    {
+        std::vector<aiBase::AIEffectBlock> blocks;
+        if (runtime.targets.empty()) {
+            return blocks;
+        }
+    
+        std::vector<std::string> effectCycle;
+        if (!runtime.options.allowedEffects.empty()) {
+            effectCycle = runtime.options.allowedEffects;
+        } else {
+            effectCycle = { "Color Wash", "Bars", "VUMeter", "On" };
+        }
+        if (effectCycle.empty()) {
+            effectCycle.push_back("Color Wash");
+        }
+    
+        int activityStart = runtime.options.startMS;
+        if (!runtime.analysis.beatMS.empty()) {
+            int firstBeat = runtime.analysis.beatMS.front();
+            if (firstBeat > runtime.options.startMS + 250) {
+                activityStart = firstBeat;
+            } else {
+                activityStart = std::max(runtime.options.startMS, firstBeat);
+            }
+        }
+    
+        std::vector<int> sectionStarts = runtime.analysis.sectionMS;
+        if (sectionStarts.empty()) {
+            sectionStarts.push_back(activityStart);
+            sectionStarts.push_back(runtime.options.endMS);
+        } else if (sectionStarts.front() != activityStart) {
+            sectionStarts.insert(sectionStarts.begin(), activityStart);
+        }
+        if (sectionStarts.back() != runtime.options.endMS) {
+            sectionStarts.push_back(runtime.options.endMS);
+        }
+    
+        const bool sparse = Lower(runtime.options.density) == "sparse";
+        const bool busy = Lower(runtime.options.density) == "busy";
+        int priority = 0;
+        for (size_t ti = 0; ti < runtime.targets.size(); ++ti) {
+            const std::string targetName = runtime.targets[ti]->GetModelName();
+            for (size_t si = 0; si + 1 < sectionStarts.size(); ++si) {
+                int sectionStart = sectionStarts[si];
+                int sectionEnd = sectionStarts[si + 1];
+                if (sectionEnd <= sectionStart) {
+                    continue;
+                }
+                if (sparse && (si % 2) == 1) {
+                    continue;
+                }
+    
+                const std::string effectName = effectCycle[(si + ti + static_cast<size_t>(runtime.regenerationCount)) % effectCycle.size()];
+                const int splitCount = busy ? 2 : 1;
+                const int sectionLen = sectionEnd - sectionStart;
+                for (int split = 0; split < splitCount; ++split) {
+                    aiBase::AIEffectBlock block;
+                    block.targetName = targetName;
+                    block.effectName = effectName;
+                    block.startMS = sectionStart + (sectionLen * split) / splitCount;
+                    block.endMS = sectionStart + (sectionLen * (split + 1)) / splitCount;
+                    block.confidence = 0.6F;
+                    block.priority = priority++;
+                    block.reason = "Deterministic music section mapping.";
+                    blocks.push_back(std::move(block));
+                }
+            }
+        }
+    
+        return blocks;
+    }
+    
+    static bool IsSerializedPaletteString(const std::string& palette)
+    {
+        return palette.find("C_BUTTON_Palette1=") != std::string::npos;
+    }
+    
+    static bool IsHexColorToken(const std::string& token)
+    {
+        if (token.empty()) {
+            return false;
+        }
+        size_t start = 0;
+        if (token[0] == '#') {
+            start = 1;
+        }
+        const size_t len = token.size() - start;
+        if (len != 6 && len != 8) {
+            return false;
+        }
+        for (size_t i = start; i < token.size(); ++i) {
+            if (!std::isxdigit(static_cast<unsigned char>(token[i]))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    
+    static std::string NormalizeMusicBlockPalette(const std::string& palette)
+    {
+        std::string p = Trim(palette);
+        if (p.empty()) {
+            return {};
+        }
+        if (IsSerializedPaletteString(p)) {
+            return p;
+        }
+        if (IsHexColorToken(p)) {
+            if (p[0] != '#') {
+                p = "#" + p;
+            }
+            return "C_BUTTON_Palette1=" + p + ",C_CHECKBOX_Palette1=1,"
+                   "C_BUTTON_Palette2=#FFFFFF,C_CHECKBOX_Palette2=1";
+        }
+        return {};
+    }
+    
+    static std::string BuildFallbackPalette(const aiBase::AIEffectBlock& block)
+    {
+        static const std::vector<std::string> kPalettes = {
+            "C_BUTTON_Palette1=#FF0033,C_CHECKBOX_Palette1=1,C_BUTTON_Palette2=#FFCC00,C_CHECKBOX_Palette2=1,C_BUTTON_Palette3=#00C2FF,C_CHECKBOX_Palette3=1,C_BUTTON_Palette4=#7C4DFF,C_CHECKBOX_Palette4=1",
+            "C_BUTTON_Palette1=#00E676,C_CHECKBOX_Palette1=1,C_BUTTON_Palette2=#00B0FF,C_CHECKBOX_Palette2=1,C_BUTTON_Palette3=#F50057,C_CHECKBOX_Palette3=1,C_BUTTON_Palette4=#FFD600,C_CHECKBOX_Palette4=1",
+            "C_BUTTON_Palette1=#FFFFFF,C_CHECKBOX_Palette1=1,C_BUTTON_Palette2=#00BCD4,C_CHECKBOX_Palette2=1,C_BUTTON_Palette3=#3F51B5,C_CHECKBOX_Palette3=1,C_BUTTON_Palette4=#E91E63,C_CHECKBOX_Palette4=1",
+            "C_BUTTON_Palette1=#FF6F00,C_CHECKBOX_Palette1=1,C_BUTTON_Palette2=#D50000,C_CHECKBOX_Palette2=1,C_BUTTON_Palette3=#2962FF,C_CHECKBOX_Palette3=1,C_BUTTON_Palette4=#00C853,C_CHECKBOX_Palette4=1",
+            "C_BUTTON_Palette1=#F8BBD0,C_CHECKBOX_Palette1=1,C_BUTTON_Palette2=#CE93D8,C_CHECKBOX_Palette2=1,C_BUTTON_Palette3=#90CAF9,C_CHECKBOX_Palette3=1,C_BUTTON_Palette4=#80CBC4,C_CHECKBOX_Palette4=1",
+            "C_BUTTON_Palette1=#B71C1C,C_CHECKBOX_Palette1=1,C_BUTTON_Palette2=#E65100,C_CHECKBOX_Palette2=1,C_BUTTON_Palette3=#1B5E20,C_CHECKBOX_Palette3=1,C_BUTTON_Palette4=#0D47A1,C_CHECKBOX_Palette4=1"
+        };
+        const std::string hashKey = block.targetName + "|" + block.effectName + "|" + std::to_string(block.startMS);
+        const size_t idx = std::hash<std::string>{}(hashKey) % kPalettes.size();
+        return kPalettes[idx];
+    }
+    
+    } // namespace
+
+    
 void xLightsFrame::CreateSequencer()
 {
     // Lots of logging here as this function hard crashes
@@ -4392,6 +4770,363 @@ void xLightsFrame::CallOnEffectAfterSelected(std::function<bool(Effect *)> &&cb)
             }
         }
     }
+}
+
+void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
+    if (CurrentSeqXmlFile->GetMedia() == nullptr || !CurrentSeqXmlFile->HasAudioMedia()) {
+        wxMessageBox("No media file associated with this sequence. Please add a media file and try again.", "Error", wxICON_ERROR);
+        return;
+    }
+
+    const int frameMS = std::max(1, CurrentSeqXmlFile->GetFrequency());
+    const int sequenceEnd = _sequenceElements.GetSequenceEnd();
+    const int fullStartMS = 0;
+    const int fullEndMS = std::max(frameMS, sequenceEnd);
+
+    std::vector<ModelElement*> allTargets;
+    std::vector<ModelElement*> selectedTargets;
+    std::vector<ModelElement*> selectedGroupTargets;
+    for (size_t i = 0; i < _sequenceElements.GetElementCount(MASTER_VIEW); ++i) {
+        auto* modelElement = dynamic_cast<ModelElement*>(_sequenceElements.GetElement(i, MASTER_VIEW));
+        if (modelElement == nullptr) {
+            continue;
+        }
+        allTargets.push_back(modelElement);
+        if (modelElement->GetSelected()) {
+            selectedTargets.push_back(modelElement);
+            auto* model = GetModel(modelElement->GetModelName());
+            if (model != nullptr && model->GetDisplayAs() == DisplayAsType::ModelGroup) {
+                selectedGroupTargets.push_back(modelElement);
+            }
+        }
+    }
+
+    if (allTargets.empty()) {
+        wxMessageBox("No target models are available in the sequence.", "Error", wxICON_ERROR);
+        return;
+    }
+
+    int selectedRangeStart = fullStartMS;
+    int selectedRangeEnd = fullEndMS;
+    const bool hasSelectedRanges = _sequenceElements.GetSelectedRangeCount() > 0;
+    if (hasSelectedRanges) {
+        selectedRangeStart = std::numeric_limits<int>::max();
+        selectedRangeEnd = 0;
+        for (size_t i = 0; i < _sequenceElements.GetSelectedRangeCount(); ++i) {
+            auto* range = _sequenceElements.GetSelectedRange(i);
+            selectedRangeStart = std::min(selectedRangeStart, static_cast<int>(range->StartTime));
+            selectedRangeEnd = std::max(selectedRangeEnd, static_cast<int>(range->EndTime));
+        }
+        if (selectedRangeStart >= selectedRangeEnd) {
+            selectedRangeStart = fullStartMS;
+            selectedRangeEnd = fullEndMS;
+        }
+    }
+    auto services = GetAIServices(aiType::MUSIC2EFFECTS);
+    AIMusicEffectsDialog dialog(this, services, hasSelectedRanges);
+
+    bool generatedPlanReady = false;
+    bool usedAIPlanner = false;
+    MusicGenerationRuntimeData generatedRuntime;
+    std::vector<aiBase::AIEffectBlock> generatedBlocks;
+    std::vector<std::string> generatedWarnings;
+
+    auto generatePlan = [&](bool regenerate) {
+        MusicGenerationRuntimeData runtime;
+        runtime.options.style = dialog.GetStylePrompt();
+        runtime.options.intensity = dialog.GetIntensity();
+        runtime.options.density = dialog.GetDensity();
+        runtime.options.allowedEffects = { "On", "Color Wash", "Bars", "VU Meter" };
+        runtime.options.overwritePolicy = "new_layer";
+        if (dialog.GetLayerPolicy() == "Merge in open spaces") {
+            runtime.options.overwritePolicy = "merge_open";
+        } else if (dialog.GetLayerPolicy() == "Overwrite selected time range") {
+            runtime.options.overwritePolicy = "overwrite_range";
+        }
+
+        if (dialog.GetTimeRange() == "Selection only" && hasSelectedRanges) {
+            runtime.options.startMS = selectedRangeStart;
+            runtime.options.endMS = selectedRangeEnd;
+        } else {
+            runtime.options.startMS = fullStartMS;
+            runtime.options.endMS = fullEndMS;
+        }
+        runtime.regenerationCount = regenerate ? (generatedRuntime.regenerationCount + 1) : 0;
+
+        const std::string scope = dialog.GetScope();
+        if (scope == "Selected models only") {
+            runtime.targets = selectedTargets;
+        } else if (scope == "Selected groups only") {
+            runtime.targets = selectedGroupTargets;
+        } else {
+            runtime.targets = allTargets;
+        }
+        if (runtime.targets.empty()) {
+            dialog.SetPreviewText("No targets matched the selected scope.");
+            dialog.SetPlanReady(false);
+            generatedPlanReady = false;
+            return;
+        }
+
+        runtime.targetInfos.clear();
+        runtime.targetInfos.reserve(runtime.targets.size());
+        for (auto* target : runtime.targets) {
+            aiBase::MappingModelInfo info;
+            info.name = target->GetModelName();
+            info.type = "Model";
+            if (auto* model = GetModel(target->GetModelName()); model != nullptr) {
+                info.nodeCount = static_cast<int>(model->GetNodeCount());
+                info.width = model->GetDefaultBufferWi();
+                info.height = model->GetDefaultBufferHt();
+            }
+            runtime.targetInfos.push_back(std::move(info));
+        }
+
+        runtime.analysis = BuildDeterministicMusicAnalysis(CurrentSeqXmlFile->GetMedia(), runtime.options.startMS, runtime.options.endMS, frameMS);
+        aiBase::AIMusicEffectPlan plan;
+        usedAIPlanner = false;
+        const int serviceSelection = dialog.GetSelectedServiceIndex();
+        if (serviceSelection > 0 && static_cast<size_t>(serviceSelection - 1) < services.size()) {
+            auto* service = services[serviceSelection - 1];
+            usedAIPlanner = true;
+            plan = service->GenerateMusicEffectPlan(runtime.analysis, runtime.targetInfos, runtime.options);
+            if (!plan.error.empty()) {
+                plan.warnings.push_back("AI planner failed: " + plan.error + " Falling back to deterministic planner.");
+                plan.error.clear();
+                plan.blocks.clear();
+                usedAIPlanner = false;
+            }
+        }
+        if (plan.blocks.empty()) {
+            plan.blocks = BuildDeterministicBlocks(runtime);
+        }
+
+        std::set<std::string> validTargets;
+        for (auto* target : runtime.targets) {
+            validTargets.insert(target->GetModelName());
+        }
+
+        auto normalizeEffectName = [&](std::string effectName) {
+            effectName = Trim(effectName);
+            if (effectName.empty()) {
+                return effectName;
+            }
+            if (effectManager.GetEffect(effectName) != nullptr) {
+                return effectName;
+            }
+            const std::string lower = ::Lower(effectName);
+            if (lower == "vumeter" || lower == "vu meter") {
+                return std::string("VU Meter");
+            }
+            if (lower == "colorwash" || lower == "color wash") {
+                return std::string("Color Wash");
+            }
+            return effectName;
+        };
+
+        std::map<std::string, int> warningCounts;
+        std::vector<aiBase::AIEffectBlock> validatedBlocks;
+        validatedBlocks.reserve(plan.blocks.size());
+        for (auto& block : plan.blocks) {
+            block.effectName = normalizeEffectName(block.effectName);
+            if (validTargets.find(block.targetName) == validTargets.end()) {
+                warningCounts["unknown_target:" + block.targetName]++;
+                continue;
+            }
+            if (effectManager.GetEffect(block.effectName) == nullptr) {
+                warningCounts["unknown_effect:" + block.effectName]++;
+                continue;
+            }
+            block.startMS = std::max(runtime.options.startMS, std::min(block.startMS, runtime.options.endMS));
+            block.endMS = std::max(runtime.options.startMS, std::min(block.endMS, runtime.options.endMS));
+            if (block.endMS <= block.startMS) {
+                block.endMS = std::min(runtime.options.endMS, block.startMS + frameMS);
+            }
+            if (block.endMS <= block.startMS) {
+                warningCounts["zero_length"]++;
+                continue;
+            }
+            validatedBlocks.push_back(std::move(block));
+        }
+
+        for (const auto& [k, count] : warningCounts) {
+            if (k == "zero_length") {
+                plan.warnings.push_back(wxString::Format("Skipping %d zero-length block(s) after clamping.", count).ToStdString());
+                continue;
+            }
+            if (StartsWith(k, "unknown_effect:")) {
+                const std::string effectName = k.substr(15);
+                plan.warnings.push_back(wxString::Format("Skipping %d block(s) with unknown effect '%s'.", count, effectName.c_str()).ToStdString());
+                continue;
+            }
+            if (StartsWith(k, "unknown_target:")) {
+                const std::string targetName = k.substr(15);
+                plan.warnings.push_back(wxString::Format("Skipping %d block(s) with unknown target '%s'.", count, targetName.c_str()).ToStdString());
+            }
+        }
+
+        generatedBlocks = std::move(validatedBlocks);
+        generatedWarnings = std::move(plan.warnings);
+        generatedRuntime = std::move(runtime);
+        generatedPlanReady = !generatedBlocks.empty();
+
+        std::map<std::string, int> effectCounts;
+        for (const auto& block : generatedBlocks) {
+            effectCounts[block.effectName]++;
+        }
+
+        wxString preview = wxString::Format(
+            "Planner: %s\nTargets: %zu\nRange: %s to %s\nBlocks: %zu\n\nEffect usage:\n",
+            usedAIPlanner ? "AI" : "Deterministic",
+            generatedRuntime.targets.size(),
+            FORMATTIME(generatedRuntime.options.startMS),
+            FORMATTIME(generatedRuntime.options.endMS),
+            generatedBlocks.size());
+        for (const auto& [effectName, count] : effectCounts) {
+            preview += wxString::Format("- %s: %d\n", effectName, count);
+        }
+        if (!generatedWarnings.empty()) {
+            preview += "\nWarnings:\n";
+            for (const auto& warning : generatedWarnings) {
+                preview += "- " + wxString(warning) + "\n";
+            }
+        }
+        if (generatedBlocks.empty()) {
+            preview += "\nNo valid blocks generated. Adjust settings and regenerate.";
+        }
+        dialog.SetPreviewText(preview);
+        dialog.SetPlanReady(generatedPlanReady);
+    };
+
+    dialog.GetGenerateButton()->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        generatePlan(false);
+    });
+    dialog.GetRegenerateButton()->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        generatePlan(true);
+    });
+    dialog.GetApplyButton()->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
+        if (generatedPlanReady) {
+            dialog.EndModal(wxID_OK);
+        }
+    });
+
+    if (dialog.ShowModal() != wxID_OK) {
+        return;
+    }
+    if (!generatedPlanReady || generatedBlocks.empty()) {
+        return;
+    }
+
+    _sequenceElements.get_undo_mgr().CreateUndoStep();
+
+    if (generatedRuntime.options.overwritePolicy == "overwrite_range") {
+        for (auto* target : generatedRuntime.targets) {
+            for (size_t layerIdx = 0; layerIdx < target->GetEffectLayerCount(); ++layerIdx) {
+                auto* layer = target->GetEffectLayer(static_cast<int>(layerIdx));
+                if (layer == nullptr) {
+                    continue;
+                }
+                layer->SelectEffectsInTimeRange(generatedRuntime.options.startMS, generatedRuntime.options.endMS);
+                layer->DeleteSelectedEffects(_sequenceElements.get_undo_mgr());
+            }
+        }
+    }
+
+    std::map<std::string, EffectLayer*> targetLayerMap;
+    for (const auto& block : generatedBlocks) {
+        auto* modelElement = dynamic_cast<ModelElement*>(_sequenceElements.GetElement(block.targetName));
+        if (modelElement == nullptr) {
+            continue;
+        }
+
+        EffectLayer* layer = nullptr;
+        auto existingLayer = targetLayerMap.find(block.targetName);
+        if (existingLayer != targetLayerMap.end()) {
+            layer = existingLayer->second;
+        } else if (generatedRuntime.options.overwritePolicy == "merge_open") {
+            layer = modelElement->FindOpenLayer(block.startMS, block.endMS);
+            if (layer == nullptr) {
+                layer = modelElement->AddEffectLayer();
+            }
+            targetLayerMap[block.targetName] = layer;
+        } else if (generatedRuntime.options.overwritePolicy == "overwrite_range") {
+            layer = modelElement->GetEffectLayerCount() > 0 ? modelElement->GetEffectLayer(0) : modelElement->AddEffectLayer();
+            targetLayerMap[block.targetName] = layer;
+        } else {
+            layer = modelElement->AddEffectLayer();
+            targetLayerMap[block.targetName] = layer;
+        }
+
+        std::string settings;
+        auto rawSettings = block.settings.find("__rawSettings");
+        if (rawSettings != block.settings.end()) {
+            settings = rawSettings->second;
+        }
+
+        std::string palette = NormalizeMusicBlockPalette(block.palette);
+        if (palette.empty()) {
+            palette = BuildFallbackPalette(block);
+        }
+
+        Effect* effect = layer->AddEffect(0, block.effectName, settings, palette, block.startMS, block.endMS, EFFECT_NOT_SELECTED, false);
+        if (effect != nullptr) {
+            _sequenceElements.get_undo_mgr().CaptureAddedEffect(layer->GetParentElement()->GetFullName(), layer->GetIndex(), effect->GetID());
+        }
+    }
+
+    auto addTimingTrack = [&](const std::string& baseName, const std::string& markerName, const std::vector<int>& marks) {
+        if (marks.empty()) {
+            return;
+        }
+        std::vector<int> boundaries;
+        boundaries.reserve(marks.size() + 1);
+        for (const auto mark : marks) {
+            if (mark >= generatedRuntime.options.startMS && mark < generatedRuntime.options.endMS) {
+                boundaries.push_back(mark);
+            }
+        }
+        if (boundaries.empty()) {
+            return;
+        }
+        boundaries.push_back(generatedRuntime.options.endMS);
+        std::sort(boundaries.begin(), boundaries.end());
+        boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+        if (boundaries.size() < 2) {
+            return;
+        }
+        const std::string timingName = GetUniqueTimingName(baseName);
+        Element* timingElement = AddTimingElement(timingName);
+        auto* layer = timingElement->GetEffectLayer(0);
+        for (size_t i = 0; i + 1 < boundaries.size(); ++i) {
+            int start = RoundToMultipleOfPeriod(boundaries[i], frameMS);
+            int end = RoundToMultipleOfPeriod(boundaries[i + 1], frameMS);
+            if (end <= start) {
+                end = std::min(generatedRuntime.options.endMS, start + frameMS);
+            }
+            if (end <= start) {
+                continue;
+            }
+            auto* mark = layer->AddEffect(0, markerName, "", "", start, end, EFFECT_NOT_SELECTED, false);
+            if (mark != nullptr) {
+                _sequenceElements.get_undo_mgr().CaptureAddedEffect(layer->GetParentElement()->GetFullName(), layer->GetIndex(), mark->GetID());
+            }
+        }
+    };
+
+    if (dialog.ShouldCreateBeatTrack()) {
+        addTimingTrack("AI_Beat", "Beat", generatedRuntime.analysis.beatMS);
+    }
+    if (dialog.ShouldCreateDownbeatTrack()) {
+        addTimingTrack("AI_Downbeat", "Downbeat", generatedRuntime.analysis.downbeatMS);
+    }
+    if (dialog.ShouldCreateSectionTrack()) {
+        addTimingTrack("AI_Section", "Section", generatedRuntime.analysis.sectionMS);
+    }
+
+    wxCommandEvent eventRowHeaderChanged(EVT_ROW_HEADINGS_CHANGED);
+    wxPostEvent(this, eventRowHeaderChanged);
+    wxCommandEvent eventForceRefresh(EVT_FORCE_SEQUENCER_REFRESH);
+    wxPostEvent(this, eventForceRefresh);
 }
 
 void xLightsFrame::GenerateAILyrics(wxCommandEvent& /* command*/) {
