@@ -21,6 +21,16 @@ XLIGHTS/NUTCRACKER RELEASE NOTES
                                 reuses existing beat/section timing tracks in the sequence as song-structure cues.
     -enh (erock530)             AI music generation now applies audio-aware fade-in/fade-out and suppresses blocks
                                 in very low-audio windows (including quiet tails), reducing "full effects in silence".
+    -enh (erock530)             AI music generation now performs a dedicated AI music-analysis pass first, then uses
+                                that structured analysis to drive the final effect-plan generation.
+    -enh (erock530)             AI music planning now uploads the actual media clip for a transcription/timestamp pass
+                                and feeds that clip-derived context into the analysis and effect-planning prompts.
+    -enh (erock530)             AI music planning now includes the song name (media filename stem) in planner prompts
+                                so the model can better infer song-specific style context.
+    -bug (erock530)             AI music planning now falls back to transcription `response_format=json` for models
+                                that reject `verbose_json`, and correctly resolves media clip path from sequence media.
+    -bug (erock530)             AI music planner now falls back to deterministic generation when AI returns too few
+                                blocks for practical sequence coverage.
     -enh (dkulp)                macOS: MetricKit collector subscribes at launch (macOS 12+) and writes hang / CPU /
                                 disk-write / crash diagnostics + daily metrics as JSON into a Diagnostics/ folder
                                 next to xLights_spdlog.log. Whatever has accumulated since the last submission is

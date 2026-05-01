@@ -210,6 +210,8 @@ public:
         std::string overwritePolicy = "new_layer";
         int startMS = 0;
         int endMS = 0;
+        std::string mediaPath;
+        std::string songName;
     };
 
     [[nodiscard]] virtual AIMusicEffectPlan GenerateMusicEffectPlan(

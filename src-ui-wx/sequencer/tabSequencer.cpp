@@ -11,6 +11,8 @@
  #include <algorithm>
  #include <cctype>
 #include <cmath>
+#include <chrono>
+#include <future>
  #include <functional>
  #include <map>
  #include <set>
@@ -28,6 +30,7 @@
 #include <wx/sizer.h>
 #include <wx/stattext.h>
 #include <wx/textctrl.h>
+#include <wx/gauge.h>
 #include "settings/XLightsConfigAdapter.h"
 #include <wx/textfile.h>
 
@@ -206,6 +209,14 @@ namespace {
                                          wxDefaultPosition, wxSize(-1, 260),
                                          wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP);
             rootSizer->Add(PreviewText, 1, wxEXPAND | wxALL, 10);
+
+            auto* progressRow = new wxBoxSizer(wxHORIZONTAL);
+            ProgressText = new wxStaticText(this, wxID_ANY, "");
+            ProgressGauge = new wxGauge(this, wxID_ANY, 100, wxDefaultPosition, wxSize(180, -1), wxGA_SMOOTH | wxGA_HORIZONTAL);
+            ProgressGauge->Hide();
+            progressRow->Add(ProgressText, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            progressRow->Add(ProgressGauge, 0, wxALIGN_CENTER_VERTICAL, 0);
+            rootSizer->Add(progressRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
     
             auto* buttonRow = new wxBoxSizer(wxHORIZONTAL);
             GenerateButton = new wxButton(this, wxID_ANY, "Generate Plan");
@@ -246,6 +257,37 @@ namespace {
             ApplyButton->Enable(ready);
             RegenerateButton->Enable(ready);
         }
+        void SetProcessing(bool processing, const wxString& message = "Processing... please wait")
+        {
+            if (processing) {
+                ProgressText->SetLabel(message);
+                ProgressGauge->Show();
+                ProgressGauge->Pulse();
+                GenerateButton->Enable(false);
+                RegenerateButton->Enable(false);
+                ApplyButton->Enable(false);
+            } else {
+                ProgressText->SetLabel("");
+                ProgressGauge->Hide();
+                GenerateButton->Enable(true);
+            }
+            Layout();
+            Update();
+        }
+        void SetProcessingMessage(const wxString& message)
+        {
+            ProgressText->SetLabel(message);
+            ProgressGauge->Pulse();
+            Layout();
+            Update();
+        }
+        void PulseProcessing()
+        {
+            if (ProgressGauge != nullptr && ProgressGauge->IsShown()) {
+                ProgressGauge->Pulse();
+                Update();
+            }
+        }
     
     private:
         static void AddLabeledControl(wxFlexGridSizer* grid, const wxString& label, wxWindow* control)
@@ -266,6 +308,8 @@ namespace {
         wxCheckBox* CreateDownbeatTrack = nullptr;
         wxCheckBox* CreateSectionTrack = nullptr;
         wxTextCtrl* PreviewText = nullptr;
+        wxStaticText* ProgressText = nullptr;
+        wxGauge* ProgressGauge = nullptr;
         wxButton* GenerateButton = nullptr;
         wxButton* RegenerateButton = nullptr;
         wxButton* ApplyButton = nullptr;
@@ -5334,10 +5378,22 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
     std::vector<std::string> generatedWarnings;
 
     auto generatePlan = [&](bool regenerate) {
+        dialog.SetProcessing(true, regenerate ? "Regenerating plan... please wait" : "Generating plan... please wait");
+        wxYieldIfNeeded();
+        dialog.SetProcessingMessage("Preparing analysis inputs...");
         MusicGenerationRuntimeData runtime;
         runtime.options.style = dialog.GetStylePrompt();
         runtime.options.intensity = dialog.GetIntensity();
         runtime.options.density = dialog.GetDensity();
+        runtime.options.mediaPath = CurrentSeqXmlFile->GetMediaFile();
+        if (runtime.options.mediaPath.empty() && CurrentSeqXmlFile->GetMedia() != nullptr) {
+            runtime.options.mediaPath = CurrentSeqXmlFile->GetMedia()->FileName();
+        }
+        runtime.options.songName.clear();
+        if (!runtime.options.mediaPath.empty()) {
+            wxFileName mediaFileName(runtime.options.mediaPath);
+            runtime.options.songName = mediaFileName.GetName().ToStdString();
+        }
         const std::vector<std::string> preferredEffects = {
             "On", "Color Wash", "Bars", "VU Meter", "Marquee", "Twinkle", "Pinwheel", "Spirals", "Butterfly", "Meteors"
         };
@@ -5378,10 +5434,12 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
         if (runtime.targets.empty()) {
             dialog.SetPreviewText("No targets matched the selected scope.");
             dialog.SetPlanReady(false);
+            dialog.SetProcessing(false);
             generatedPlanReady = false;
             return;
         }
 
+        dialog.SetProcessingMessage("Inspecting target models...");
         runtime.targetInfos.clear();
         runtime.targetInfos.reserve(runtime.targets.size());
         for (auto* target : runtime.targets) {
@@ -5401,31 +5459,227 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
                 info.aliases = BuildModelNameHints(target->GetModelName(), info.modelClass);
             }
             runtime.targetInfos.push_back(std::move(info));
+            if ((runtime.targetInfos.size() % 16) == 0) {
+                dialog.PulseProcessing();
+                wxYieldIfNeeded();
+            }
         }
 
+        dialog.SetProcessingMessage("Analyzing music timing/energy...");
         runtime.analysis = BuildDeterministicMusicAnalysis(CurrentSeqXmlFile->GetMedia(), &_sequenceElements, runtime.options.startMS, runtime.options.endMS, frameMS);
+        dialog.PulseProcessing();
         aiBase::AIMusicEffectPlan plan;
         usedAIPlanner = false;
         const int serviceSelection = dialog.GetSelectedServiceIndex();
+        std::string selectedServiceName = "Deterministic";
+        auto sampleDeterministicAugmentation = [](const std::vector<aiBase::AIEffectBlock>& source, size_t needed) {
+            std::vector<aiBase::AIEffectBlock> sampled;
+            if (needed == 0 || source.empty()) {
+                return sampled;
+            }
+            sampled.reserve(std::min(needed, source.size()));
+            if (source.size() <= needed) {
+                sampled = source;
+                return sampled;
+            }
+
+            const double step = static_cast<double>(source.size()) / static_cast<double>(needed);
+            for (size_t i = 0; i < needed; ++i) {
+                size_t idx = static_cast<size_t>(step * static_cast<double>(i));
+                if (idx >= source.size()) {
+                    idx = source.size() - 1;
+                }
+                sampled.push_back(source[idx]);
+            }
+            return sampled;
+        };
         if (serviceSelection > 0 && static_cast<size_t>(serviceSelection - 1) < services.size()) {
             auto* service = services[serviceSelection - 1];
+            selectedServiceName = service->GetLLMName();
             usedAIPlanner = true;
-            plan = service->GenerateMusicEffectPlan(runtime.analysis, runtime.targetInfos, runtime.options);
+            dialog.SetProcessingMessage("Calling AI planner (uploading/analyzing clip)...");
+            auto planFuture = std::async(std::launch::async, [service, &runtime]() {
+                return service->GenerateMusicEffectPlan(runtime.analysis, runtime.targetInfos, runtime.options);
+            });
+            while (planFuture.wait_for(std::chrono::milliseconds(120)) != std::future_status::ready) {
+                dialog.PulseProcessing();
+                wxYieldIfNeeded();
+            }
+            plan = planFuture.get();
             if (!plan.error.empty()) {
                 plan.warnings.push_back("AI planner failed: " + plan.error + " Falling back to deterministic planner.");
                 plan.error.clear();
                 plan.blocks.clear();
                 usedAIPlanner = false;
+            } else if (plan.blocks.empty() && plan.warnings.empty()) {
+                plan.warnings.push_back(
+                    wxString::Format("AI planner service '%s' returned an empty plan with no explicit error. Applying local fallback seeding to keep AI workflow active.",
+                                     selectedServiceName).ToStdString());
+            }
+        }
+        if (usedAIPlanner) {
+            const size_t minimumCoverageBlocks = std::max<size_t>(24, runtime.targets.size() * 3);
+            if (plan.blocks.size() < minimumCoverageBlocks) {
+                if (plan.blocks.empty()) {
+                    dialog.SetProcessingMessage("AI planner returned empty output; seeding local fallback blocks...");
+                    const size_t seedTarget = minimumCoverageBlocks + std::max<size_t>(runtime.targets.size() / 2, minimumCoverageBlocks / 4);
+                    std::vector<aiBase::AIEffectBlock> deterministicSeed = BuildDeterministicBlocks(runtime);
+                    std::vector<aiBase::AIEffectBlock> sampled = sampleDeterministicAugmentation(deterministicSeed, seedTarget);
+                    if (!sampled.empty()) {
+                        plan.blocks = std::move(sampled);
+                        plan.warnings.push_back(
+                            wxString::Format("AI planner produced 0 block(s), below minimum coverage threshold of %zu. Seeded %zu local fallback block(s) to keep AI workflow active.",
+                                             minimumCoverageBlocks, plan.blocks.size()).ToStdString());
+                        dialog.PulseProcessing();
+                        wxYieldIfNeeded();
+                    } else {
+                        plan.warnings.push_back(
+                            wxString::Format("AI planner produced only %zu block(s), below minimum coverage threshold of %zu. Falling back to deterministic planner for fuller sequence coverage.",
+                                             plan.blocks.size(), minimumCoverageBlocks).ToStdString());
+                        usedAIPlanner = false;
+                    }
+                } else {
+                    dialog.SetProcessingMessage("Augmenting sparse AI plan for fuller coverage...");
+                    const size_t needed = minimumCoverageBlocks - plan.blocks.size();
+                    const size_t suppressionBuffer = std::max<size_t>(runtime.targets.size() / 2, needed / 3);
+                    const size_t augmentationTarget = needed + suppressionBuffer;
+                    std::vector<aiBase::AIEffectBlock> deterministicSeed = BuildDeterministicBlocks(runtime);
+                    std::vector<aiBase::AIEffectBlock> sampled = sampleDeterministicAugmentation(deterministicSeed, augmentationTarget);
+                    plan.blocks.insert(plan.blocks.end(), sampled.begin(), sampled.end());
+                    plan.warnings.push_back(
+                        wxString::Format("AI planner produced %zu block(s), below minimum coverage threshold of %zu. Added %zu sampled deterministic block(s) (including a suppression buffer) to preserve AI intent while improving coverage.",
+                                         plan.blocks.size() - sampled.size(), minimumCoverageBlocks, sampled.size()).ToStdString());
+                    dialog.PulseProcessing();
+                    wxYieldIfNeeded();
+                }
             }
         }
         if (plan.blocks.empty()) {
+            dialog.SetProcessingMessage("Building deterministic fallback plan...");
             plan.blocks = BuildDeterministicBlocks(runtime);
+            dialog.PulseProcessing();
         }
 
+        dialog.SetProcessingMessage("Validating and normalizing effect blocks...");
         std::set<std::string> validTargets;
+        std::vector<std::string> targetNames;
+        targetNames.reserve(runtime.targets.size());
         for (auto* target : runtime.targets) {
             validTargets.insert(target->GetModelName());
+            targetNames.push_back(target->GetModelName());
         }
+
+        auto normalizeTargetKey = [](const std::string& name) {
+            std::string out;
+            out.reserve(name.size());
+            for (unsigned char ch : name) {
+                if (std::isalnum(ch)) {
+                    out.push_back(static_cast<char>(std::tolower(ch)));
+                }
+            }
+            return out;
+        };
+        auto splitTargetTokens = [](const std::string& name) {
+            std::vector<std::string> tokens;
+            std::string current;
+            for (unsigned char ch : name) {
+                if (std::isalnum(ch)) {
+                    current.push_back(static_cast<char>(std::tolower(ch)));
+                } else if (!current.empty()) {
+                    if (current.size() >= 3) {
+                        tokens.push_back(current);
+                    }
+                    current.clear();
+                }
+            }
+            if (!current.empty() && current.size() >= 3) {
+                tokens.push_back(current);
+            }
+            return tokens;
+        };
+        auto tokenCloseMatch = [](const std::string& a, const std::string& b) {
+            if (a == b) {
+                return true;
+            }
+            if (a.size() >= 5 && b.size() >= 5) {
+                if (StartsWith(a, b.substr(0, 5)) || StartsWith(b, a.substr(0, 5))) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        std::map<std::string, std::string> normalizedTargetMap;
+        for (const auto& name : targetNames) {
+            const std::string key = normalizeTargetKey(name);
+            if (!key.empty()) {
+                normalizedTargetMap.emplace(key, name);
+            }
+        }
+        auto resolveTargetName = [&](const std::string& requestedName) {
+            if (validTargets.find(requestedName) != validTargets.end()) {
+                return requestedName;
+            }
+
+            std::string trimmedRequest = Trim(requestedName);
+            while (!trimmedRequest.empty() &&
+                   (trimmedRequest.back() >= '0' && trimmedRequest.back() <= '9')) {
+                trimmedRequest.pop_back();
+            }
+            if (!trimmedRequest.empty() &&
+                (trimmedRequest.back() == '-' || trimmedRequest.back() == '_' || trimmedRequest.back() == ' ')) {
+                trimmedRequest.pop_back();
+            }
+            if (validTargets.find(trimmedRequest) != validTargets.end()) {
+                return trimmedRequest;
+            }
+
+            const std::string directKey = normalizeTargetKey(requestedName);
+            if (!directKey.empty()) {
+                auto it = normalizedTargetMap.find(directKey);
+                if (it != normalizedTargetMap.end()) {
+                    return it->second;
+                }
+            }
+            const std::string trimmedKey = normalizeTargetKey(trimmedRequest);
+            if (!trimmedKey.empty()) {
+                auto it = normalizedTargetMap.find(trimmedKey);
+                if (it != normalizedTargetMap.end()) {
+                    return it->second;
+                }
+            }
+
+            std::vector<std::string> tokens = splitTargetTokens(requestedName);
+            if (tokens.empty()) {
+                return requestedName;
+            }
+
+            std::string bestName;
+            int bestScore = 0;
+            bool tie = false;
+            for (const auto& candidate : targetNames) {
+                const std::vector<std::string> candidateTokens = splitTargetTokens(candidate);
+                int score = 0;
+                for (const auto& token : tokens) {
+                    for (const auto& candidateToken : candidateTokens) {
+                        if (tokenCloseMatch(token, candidateToken)) {
+                            score++;
+                            break;
+                        }
+                    }
+                }
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestName = candidate;
+                    tie = false;
+                } else if (score > 0 && score == bestScore) {
+                    tie = true;
+                }
+            }
+            if (!tie && bestScore > 0) {
+                return bestName;
+            }
+            return requestedName;
+        };
 
         auto normalizeEffectName = [&](std::string effectName) {
             effectName = Trim(effectName);
@@ -5442,6 +5696,15 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
             if (lower == "colorwash" || lower == "color wash") {
                 return std::string("Color Wash");
             }
+            if (lower == "butterflies") {
+                return std::string("Butterfly");
+            }
+            if (lower == "pins" || lower == "pin") {
+                return std::string("Pinwheel");
+            }
+            if (lower == "spin" || lower == "spins") {
+                return std::string("Spirals");
+            }
             return effectName;
         };
 
@@ -5451,6 +5714,7 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
         validatedBlocks.reserve(plan.blocks.size());
         for (auto& block : plan.blocks) {
             block.effectName = normalizeEffectName(block.effectName);
+            block.targetName = resolveTargetName(block.targetName);
             if (validTargets.find(block.targetName) == validTargets.end()) {
                 warningCounts["unknown_target:" + block.targetName]++;
                 continue;
@@ -5493,6 +5757,10 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
                 }
             }
             validatedBlocks.push_back(std::move(block));
+            if ((validatedBlocks.size() % 128) == 0) {
+                dialog.PulseProcessing();
+                wxYieldIfNeeded();
+            }
         }
 
         for (const auto& [k, count] : warningCounts) {
@@ -5520,14 +5788,50 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
         generatedRuntime = std::move(runtime);
         generatedPlanReady = !generatedBlocks.empty();
 
+        if (usedAIPlanner) {
+            const size_t minimumCoverageBlocks = std::max<size_t>(24, generatedRuntime.targets.size() * 3);
+            if (generatedBlocks.size() >= minimumCoverageBlocks) {
+                std::vector<std::string> condensedWarnings;
+                condensedWarnings.reserve(generatedWarnings.size());
+                for (const auto& warning : generatedWarnings) {
+                    if (StartsWith(warning, "AI planner remained sparse after replan attempt.")) {
+                        continue;
+                    }
+                    if (StartsWith(warning, "AI first-pass raw preview:")) {
+                        continue;
+                    }
+                    if (StartsWith(warning, "AI coverage-fill pass did not provide additional usable blocks.")) {
+                        continue;
+                    }
+                    condensedWarnings.push_back(warning);
+                }
+                if (condensedWarnings.size() != generatedWarnings.size()) {
+                    condensedWarnings.push_back("AI plan was sparse initially but met coverage target after local augmentation.");
+                }
+                generatedWarnings = std::move(condensedWarnings);
+            }
+        }
+
         std::map<std::string, int> effectCounts;
         for (const auto& block : generatedBlocks) {
             effectCounts[block.effectName]++;
         }
 
+        const bool aiPlannerSelected = serviceSelection > 0 && static_cast<size_t>(serviceSelection - 1) < services.size();
+        wxString clipAnalysisStatus;
+        if (aiPlannerSelected && !generatedRuntime.options.mediaPath.empty()) {
+            clipAnalysisStatus = "Yes (uploaded media clip to AI transcription/analysis)";
+        } else if (aiPlannerSelected) {
+            clipAnalysisStatus = "No (AI planner selected but no media clip path available)";
+        } else {
+            clipAnalysisStatus = "No (deterministic planner selected)";
+        }
+
         wxString preview = wxString::Format(
-            "Planner: %s\nTargets: %zu\nRange: %s to %s\nBlocks: %zu\n\nEffect usage:\n",
+            "Planner: %s\nAI service: %s\nMedia clip AI analysis: %s\nTargets: %zu\nRange: %s to %s\nBlocks: %zu\n\nEffect usage:\n",
             usedAIPlanner ? "AI" : "Deterministic",
+            selectedServiceName,
+            clipAnalysisStatus,
             generatedRuntime.targets.size(),
             FORMATTIME(generatedRuntime.options.startMS),
             FORMATTIME(generatedRuntime.options.endMS),
@@ -5546,6 +5850,7 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
         }
         dialog.SetPreviewText(preview);
         dialog.SetPlanReady(generatedPlanReady);
+        dialog.SetProcessing(false);
     };
 
     dialog.GetGenerateButton()->Bind(wxEVT_BUTTON, [&](wxCommandEvent&) {
