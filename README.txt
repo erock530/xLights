@@ -14,6 +14,9 @@ XLIGHTS/NUTCRACKER RELEASE NOTES
     -enh (erock530)             Sequencer timing-row menu now includes "Generate AI Music Effects..." to build a
                                 previewable music-to-effects plan for selected/all models with undo-safe insertion
                                 and deterministic fallback when no AI planner is available.
+    -enh (erock530)             AI music-effect generation now uses model type/class metadata to diversify patterns
+                                across model shapes, and auto-creates an AI_Lyrics timing track (phrases + words)
+                                when no lyric timing track is detected.
     -enh (dkulp)                macOS: MetricKit collector subscribes at launch (macOS 12+) and writes hang / CPU /
                                 disk-write / crash diagnostics + daily metrics as JSON into a Diagnostics/ folder
                                 next to xLights_spdlog.log. Whatever has accumulated since the last submission is

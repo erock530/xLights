@@ -88,6 +88,17 @@
 
 namespace {
 
+    static bool ContainsClassToken(const std::string& lowerModelClass, const std::string& token);
+    static std::vector<std::string> BuildTargetEffectCycle(const std::vector<std::string>& allowedEffects,
+                                                           const std::string& modelClass,
+                                                           const std::string& targetName,
+                                                           int regenerationCount);
+    static bool HasLikelyLyricsTimingTrack(SequenceElements& sequenceElements);
+    static bool CreateLyricTimingTrackFromAI(xLightsFrame* frame,
+                                             const aiBase::AILyricTrack& lyricTrack,
+                                             const std::string& baseName,
+                                             std::string* errorMessage);
+
     struct MusicGenerationRuntimeData {
         aiBase::AIMusicAnalysis analysis;
         aiBase::AIMusicGenerationOptions options;
@@ -322,14 +333,10 @@ namespace {
             return blocks;
         }
     
-        std::vector<std::string> effectCycle;
-        if (!runtime.options.allowedEffects.empty()) {
-            effectCycle = runtime.options.allowedEffects;
-        } else {
-            effectCycle = { "Color Wash", "Bars", "VUMeter", "On" };
-        }
-        if (effectCycle.empty()) {
-            effectCycle.push_back("Color Wash");
+        std::map<std::string, std::string> modelClassByTarget;
+        for (const auto& targetInfo : runtime.targetInfos) {
+            std::string modelClass = targetInfo.modelClass.empty() ? targetInfo.type : targetInfo.modelClass;
+            modelClassByTarget[targetInfo.name] = modelClass;
         }
     
         int activityStart = runtime.options.startMS;
@@ -358,18 +365,28 @@ namespace {
         int priority = 0;
         for (size_t ti = 0; ti < runtime.targets.size(); ++ti) {
             const std::string targetName = runtime.targets[ti]->GetModelName();
+            const std::string modelClass = modelClassByTarget[targetName];
+            const std::string lowerClass = Lower(modelClass);
+            std::vector<std::string> effectCycle = BuildTargetEffectCycle(runtime.options.allowedEffects, modelClass, targetName, runtime.regenerationCount);
+            if (effectCycle.empty()) {
+                effectCycle.push_back("Color Wash");
+            }
+            const size_t sparsePhase = std::hash<std::string>{}(targetName + "|" + lowerClass) % 2;
             for (size_t si = 0; si + 1 < sectionStarts.size(); ++si) {
                 int sectionStart = sectionStarts[si];
                 int sectionEnd = sectionStarts[si + 1];
                 if (sectionEnd <= sectionStart) {
                     continue;
                 }
-                if (sparse && (si % 2) == 1) {
+                if (sparse && ((si + sparsePhase) % 2) == 1) {
                     continue;
                 }
     
-                const std::string effectName = effectCycle[(si + ti + static_cast<size_t>(runtime.regenerationCount)) % effectCycle.size()];
-                const int splitCount = busy ? 2 : 1;
+                const std::string effectName = effectCycle[(si + static_cast<size_t>(runtime.regenerationCount)) % effectCycle.size()];
+                int splitCount = busy ? 2 : 1;
+                if (!sparse && (ContainsClassToken(lowerClass, "matrix") || ContainsClassToken(lowerClass, "tree") || ContainsClassToken(lowerClass, "spinner"))) {
+                    splitCount++;
+                }
                 const int sectionLen = sectionEnd - sectionStart;
                 for (int split = 0; split < splitCount; ++split) {
                     aiBase::AIEffectBlock block;
@@ -446,6 +463,262 @@ namespace {
         const std::string hashKey = block.targetName + "|" + block.effectName + "|" + std::to_string(block.startMS);
         const size_t idx = std::hash<std::string>{}(hashKey) % kPalettes.size();
         return kPalettes[idx];
+    }
+
+    static bool ContainsClassToken(const std::string& lowerModelClass, const std::string& token)
+    {
+        return lowerModelClass.find(token) != std::string::npos;
+    }
+
+    static std::vector<std::string> BuildTargetEffectCycle(const std::vector<std::string>& allowedEffects,
+                                                           const std::string& modelClass,
+                                                           const std::string& targetName,
+                                                           int regenerationCount)
+    {
+        std::vector<std::string> baseCycle = allowedEffects;
+        if (baseCycle.empty()) {
+            baseCycle = { "Color Wash", "Bars", "VU Meter", "On" };
+        }
+
+        const std::string lowerClass = Lower(modelClass);
+        std::vector<std::string> preferredOrder;
+        if (ContainsClassToken(lowerClass, "matrix") || ContainsClassToken(lowerClass, "pixelplane")) {
+            preferredOrder = { "Bars", "VU Meter", "Color Wash", "On" };
+        } else if (ContainsClassToken(lowerClass, "tree") || ContainsClassToken(lowerClass, "wreath")) {
+            preferredOrder = { "VU Meter", "Bars", "Color Wash", "On" };
+        } else if (ContainsClassToken(lowerClass, "arches") || ContainsClassToken(lowerClass, "singleline") ||
+                   ContainsClassToken(lowerClass, "polyline") || ContainsClassToken(lowerClass, "icicles")) {
+            preferredOrder = { "Bars", "Color Wash", "On", "VU Meter" };
+        } else if (ContainsClassToken(lowerClass, "modelgroup")) {
+            preferredOrder = { "Color Wash", "On", "Bars", "VU Meter" };
+        } else {
+            preferredOrder = { "Color Wash", "Bars", "VU Meter", "On" };
+        }
+
+        std::vector<std::string> ordered;
+        ordered.reserve(baseCycle.size());
+        std::set<std::string> usedLower;
+        auto addMatchingEffect = [&](const std::string& preferredName) {
+            const std::string preferredLower = Lower(preferredName);
+            for (const auto& effect : baseCycle) {
+                const std::string effectLower = Lower(effect);
+                if (effectLower == preferredLower || (preferredLower == "vu meter" && effectLower == "vumeter")) {
+                    if (usedLower.insert(effectLower).second) {
+                        ordered.push_back(effect);
+                    }
+                }
+            }
+        };
+        for (const auto& preferred : preferredOrder) {
+            addMatchingEffect(preferred);
+        }
+        for (const auto& effect : baseCycle) {
+            const std::string effectLower = Lower(effect);
+            if (usedLower.insert(effectLower).second) {
+                ordered.push_back(effect);
+            }
+        }
+        if (ordered.empty()) {
+            ordered.push_back("Color Wash");
+        }
+
+        if (ordered.size() > 1) {
+            const size_t rotateBy = (std::hash<std::string>{}(targetName + "|" + lowerClass) + static_cast<size_t>(regenerationCount)) % ordered.size();
+            std::rotate(ordered.begin(), ordered.begin() + rotateBy, ordered.end());
+        }
+
+        return ordered;
+    }
+
+    static bool IsLikelyLyricToken(const std::string& token)
+    {
+        const std::string clean = Trim(token);
+        if (clean.empty()) {
+            return false;
+        }
+
+        static const std::set<std::string> kNonLyricLabels = {
+            "beat", "downbeat", "section", "chorus", "verse", "bridge", "intro", "outro", "drop", "fill"
+        };
+        const std::string lower = Lower(clean);
+        if (kNonLyricLabels.find(lower) != kNonLyricLabels.end()) {
+            return false;
+        }
+
+        return std::any_of(clean.begin(), clean.end(), [](unsigned char c) {
+            return std::isalpha(c) != 0;
+        });
+    }
+
+    static bool HasLikelyLyricsTimingTrack(SequenceElements& sequenceElements)
+    {
+        for (size_t i = 0; i < sequenceElements.GetElementCount(); ++i) {
+            auto* timing = dynamic_cast<TimingElement*>(sequenceElements.GetElement(i));
+            if (timing == nullptr) {
+                continue;
+            }
+
+            int lyricLikeMarks = 0;
+            for (int layerIdx = 0; layerIdx < timing->GetEffectLayerCount(); ++layerIdx) {
+                auto* layer = timing->GetEffectLayer(layerIdx);
+                if (layer == nullptr) {
+                    continue;
+                }
+                for (const auto* effect : layer->GetAllEffects()) {
+                    if (effect != nullptr && IsLikelyLyricToken(effect->GetEffectName())) {
+                        lyricLikeMarks++;
+                        if (lyricLikeMarks >= 3) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    struct LyricPhrase {
+        std::string text;
+        int startMS = 0;
+        int endMS = 0;
+    };
+
+    static std::vector<LyricPhrase> BuildLyricPhrases(const std::vector<aiBase::AILyric>& words)
+    {
+        std::vector<LyricPhrase> phrases;
+        if (words.empty()) {
+            return phrases;
+        }
+
+        static constexpr int kPhraseGapMS = 900;
+        LyricPhrase current;
+        current.startMS = words.front().startMS;
+        current.endMS = words.front().endMS;
+
+        for (size_t i = 0; i < words.size(); ++i) {
+            const auto& word = words[i];
+            const bool hasGap = (i > 0) && ((word.startMS - words[i - 1].endMS) > kPhraseGapMS);
+            const bool closesPhrase = !word.word.empty() &&
+                (word.word.back() == '.' || word.word.back() == '!' || word.word.back() == '?' ||
+                 word.word.back() == ',' || word.word.back() == ';' || word.word.back() == ':');
+
+            if (hasGap && !current.text.empty()) {
+                phrases.push_back(current);
+                current = {};
+                current.startMS = word.startMS;
+            } else if (current.text.empty()) {
+                current.startMS = word.startMS;
+            }
+
+            if (!current.text.empty()) {
+                current.text += " ";
+            }
+            current.text += word.word;
+            current.endMS = std::max(current.endMS, word.endMS);
+
+            if (closesPhrase) {
+                phrases.push_back(current);
+                current = {};
+            }
+        }
+
+        if (!current.text.empty()) {
+            phrases.push_back(current);
+        }
+
+        return phrases;
+    }
+
+    static bool CreateLyricTimingTrackFromAI(xLightsFrame* frame,
+                                             const aiBase::AILyricTrack& lyricTrack,
+                                             const std::string& baseName,
+                                             std::string* errorMessage)
+    {
+        if (frame == nullptr || frame->CurrentSeqXmlFile == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = "Sequence is not ready for lyric timing generation.";
+            }
+            return false;
+        }
+
+        const int frameMS = std::max(1, frame->CurrentSeqXmlFile->GetFrequency());
+        std::vector<aiBase::AILyric> words;
+        words.reserve(lyricTrack.lyrics.size());
+
+        for (const auto& lyric : lyricTrack.lyrics) {
+            std::string cleanWord = Trim(lyric.word);
+            if (cleanWord.empty()) {
+                continue;
+            }
+            const bool hasText = std::any_of(cleanWord.begin(), cleanWord.end(), [](unsigned char c) {
+                return !std::isspace(c);
+            });
+            if (!hasText) {
+                continue;
+            }
+
+            aiBase::AILyric normalized;
+            normalized.word = cleanWord;
+            normalized.startMS = std::max(0, RoundToMultipleOfPeriod(lyric.startMS, frameMS));
+            normalized.endMS = std::max(0, RoundToMultipleOfPeriod(lyric.endMS, frameMS));
+            if (normalized.endMS <= normalized.startMS) {
+                normalized.endMS = normalized.startMS + frameMS;
+            }
+            words.push_back(std::move(normalized));
+        }
+
+        if (words.empty()) {
+            if (errorMessage != nullptr) {
+                *errorMessage = "No usable lyrics were detected in the audio transcription.";
+            }
+            return false;
+        }
+
+        std::sort(words.begin(), words.end(), [](const aiBase::AILyric& a, const aiBase::AILyric& b) {
+            if (a.startMS != b.startMS) {
+                return a.startMS < b.startMS;
+            }
+            return a.endMS < b.endMS;
+        });
+
+        Element* timingElement = frame->AddTimingElement(frame->GetUniqueTimingName(baseName));
+        if (timingElement == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = "Failed to create a lyrics timing track.";
+            }
+            return false;
+        }
+
+        auto* phraseLayer = timingElement->GetEffectLayer(0);
+        auto* wordLayer = timingElement->AddEffectLayer();
+        if (phraseLayer == nullptr || wordLayer == nullptr) {
+            if (errorMessage != nullptr) {
+                *errorMessage = "Failed to initialise lyric timing layers.";
+            }
+            return false;
+        }
+
+        auto& undo = frame->GetSequenceElements().get_undo_mgr();
+        for (const auto& word : words) {
+            auto* mark = wordLayer->AddEffect(0, word.word, "", "", word.startMS, word.endMS, EFFECT_NOT_SELECTED, false);
+            if (mark != nullptr) {
+                undo.CaptureAddedEffect(wordLayer->GetParentElement()->GetFullName(), wordLayer->GetIndex(), mark->GetID());
+            }
+        }
+
+        const auto phrases = BuildLyricPhrases(words);
+        for (const auto& phrase : phrases) {
+            if (phrase.text.empty() || phrase.endMS <= phrase.startMS) {
+                continue;
+            }
+            auto* mark = phraseLayer->AddEffect(0, phrase.text, "", "", phrase.startMS, phrase.endMS, EFFECT_NOT_SELECTED, false);
+            if (mark != nullptr) {
+                undo.CaptureAddedEffect(phraseLayer->GetParentElement()->GetFullName(), phraseLayer->GetIndex(), mark->GetID());
+            }
+        }
+
+        return true;
     }
     
     } // namespace
@@ -4873,11 +5146,16 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
         for (auto* target : runtime.targets) {
             aiBase::MappingModelInfo info;
             info.name = target->GetModelName();
-            info.type = "Model";
             if (auto* model = GetModel(target->GetModelName()); model != nullptr) {
+                info.type = model->GetDisplayAsString();
+                info.modelClass = model->GetDisplayAsString();
                 info.nodeCount = static_cast<int>(model->GetNodeCount());
+                info.strandCount = std::max(0, model->GetNumStrands());
                 info.width = model->GetDefaultBufferWi();
                 info.height = model->GetDefaultBufferHt();
+            } else {
+                info.type = "Model";
+                info.modelClass = "Model";
             }
             runtime.targetInfos.push_back(std::move(info));
         }
@@ -5123,6 +5401,20 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
         addTimingTrack("AI_Section", "Section", generatedRuntime.analysis.sectionMS);
     }
 
+    if (!HasLikelyLyricsTimingTrack(_sequenceElements)) {
+        if (auto* lyricService = GetAIService(aiType::SPEECH2TEXT); lyricService != nullptr && CurrentSeqXmlFile->GetMedia() != nullptr) {
+            auto lyricTrack = lyricService->GenerateLyricTrack(CurrentSeqXmlFile->GetMedia()->FileName());
+            if (lyricTrack.error.empty()) {
+                std::string lyricsError;
+                if (!CreateLyricTimingTrackFromAI(this, lyricTrack, "AI_Lyrics", &lyricsError)) {
+                    spdlog::debug("AI lyric timing generation skipped: {}", lyricsError);
+                }
+            } else {
+                spdlog::debug("AI lyric timing generation failed: {}", lyricTrack.error);
+            }
+        }
+    }
+
     wxCommandEvent eventRowHeaderChanged(EVT_ROW_HEADINGS_CHANGED);
     wxPostEvent(this, eventRowHeaderChanged);
     wxCommandEvent eventForceRefresh(EVT_FORCE_SEQUENCER_REFRESH);
@@ -5132,41 +5424,28 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
 void xLightsFrame::GenerateAILyrics(wxCommandEvent& /* command*/) {
     if (CurrentSeqXmlFile->GetMedia() != nullptr) {
         auto service = GetAIService(aiType::SPEECH2TEXT);
+        if (service == nullptr) {
+            wxMessageBox("No AI speech-to-text service is configured.", "Error", wxICON_ERROR);
+            return;
+        }
         auto lyrics = service->GenerateLyricTrack(CurrentSeqXmlFile->GetMedia()->FileName());
         if (!lyrics.error.empty()) {
-            wxMessageBox("Failed to generate lyrics. Please check the media file and try again.", "Error", wxICON_ERROR);
+            wxMessageBox(wxString::Format("Failed to generate lyrics: %s", lyrics.error), "Error", wxICON_ERROR);
             return;
         }
 
-        auto roudTimestoMilli = [&](int start, int end) {
-            int const startTime = RoundToMultipleOfPeriod(start , CurrentSeqXmlFile->GetFrequency());
-            int endTime = RoundToMultipleOfPeriod(end , CurrentSeqXmlFile->GetFrequency());
-            if (startTime == endTime) {
-                endTime = RoundToMultipleOfPeriod(startTime + CurrentSeqXmlFile->GetFrequency(), CurrentSeqXmlFile->GetFrequency());
-            }
-            return std::make_pair(startTime, endTime);
-        };
-
-        std::string track_name = GetUniqueTimingName("AutoGen");
-
-        Element* element = AddTimingElement(track_name);
-        EffectLayer* effectLayer = element->GetEffectLayer(0);
-
-        for (auto const& lyric : lyrics.lyrics) {
-            auto [wordStartTime, wordEndTime] = roudTimestoMilli(lyric.startMS, lyric.endMS);
-            auto cword = Trim(lyric.word);
-            if (cword.empty()) {
-                continue;
-            }
-            bool const hasText = std::any_of(cword.begin(), cword.end(), [](unsigned char ch) { return !std::isspace(ch); });
-            if (!hasText) {
-                continue;
-            }
-            effectLayer->AddEffect(0, cword, "", "", wordStartTime, wordEndTime, EFFECT_NOT_SELECTED, false);
+        _sequenceElements.get_undo_mgr().CreateUndoStep();
+        std::string lyricError;
+        if (!CreateLyricTimingTrackFromAI(this, lyrics, "AI_Lyrics", &lyricError)) {
+            _sequenceElements.get_undo_mgr().CancelLastStep();
+            wxMessageBox(lyricError, "Error", wxICON_ERROR);
+            return;
         }
 
         wxCommandEvent eventRowHeaderChanged(EVT_ROW_HEADINGS_CHANGED);
         wxPostEvent(this, eventRowHeaderChanged);
+        wxCommandEvent eventForceRefresh(EVT_FORCE_SEQUENCER_REFRESH);
+        wxPostEvent(this, eventForceRefresh);
     } else {
         wxMessageBox("No media file associated with this sequence. Please add a media file and try again.", "Error", wxICON_ERROR);
     }
