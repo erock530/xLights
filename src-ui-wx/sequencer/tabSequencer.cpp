@@ -372,6 +372,7 @@ namespace {
                 effectCycle.push_back("Color Wash");
             }
             const size_t sparsePhase = std::hash<std::string>{}(targetName + "|" + lowerClass) % 2;
+            std::string previousEffectName;
             for (size_t si = 0; si + 1 < sectionStarts.size(); ++si) {
                 int sectionStart = sectionStarts[si];
                 int sectionEnd = sectionStarts[si + 1];
@@ -382,7 +383,13 @@ namespace {
                     continue;
                 }
     
-                const std::string effectName = effectCycle[(si + static_cast<size_t>(runtime.regenerationCount)) % effectCycle.size()];
+                size_t effectIndex = std::hash<std::string>{}(
+                    targetName + "|" + lowerClass + "|" + std::to_string(runtime.regenerationCount) + "|" + std::to_string(si)) % effectCycle.size();
+                if (effectCycle.size() > 1 && effectCycle[effectIndex] == previousEffectName) {
+                    effectIndex = (effectIndex + 1 + (ti % (effectCycle.size() - 1))) % effectCycle.size();
+                }
+                const std::string effectName = effectCycle[effectIndex];
+                previousEffectName = effectName;
                 int splitCount = busy ? 2 : 1;
                 if (!sparse && (ContainsClassToken(lowerClass, "matrix") || ContainsClassToken(lowerClass, "tree") || ContainsClassToken(lowerClass, "spinner"))) {
                     splitCount++;
@@ -483,16 +490,16 @@ namespace {
         const std::string lowerClass = Lower(modelClass);
         std::vector<std::string> preferredOrder;
         if (ContainsClassToken(lowerClass, "matrix") || ContainsClassToken(lowerClass, "pixelplane")) {
-            preferredOrder = { "Bars", "VU Meter", "Color Wash", "On" };
+            preferredOrder = { "Bars", "VU Meter", "Color Wash", "Pinwheel", "Spirals", "Butterfly", "Twinkle", "Meteors", "On" };
         } else if (ContainsClassToken(lowerClass, "tree") || ContainsClassToken(lowerClass, "wreath")) {
-            preferredOrder = { "VU Meter", "Bars", "Color Wash", "On" };
+            preferredOrder = { "VU Meter", "Butterfly", "Spirals", "Bars", "Color Wash", "Twinkle", "Meteors", "Pinwheel", "On" };
         } else if (ContainsClassToken(lowerClass, "arches") || ContainsClassToken(lowerClass, "singleline") ||
                    ContainsClassToken(lowerClass, "polyline") || ContainsClassToken(lowerClass, "icicles")) {
-            preferredOrder = { "Bars", "Color Wash", "On", "VU Meter" };
+            preferredOrder = { "Bars", "Marquee", "Meteors", "Color Wash", "Pinwheel", "On", "VU Meter" };
         } else if (ContainsClassToken(lowerClass, "modelgroup")) {
-            preferredOrder = { "Color Wash", "On", "Bars", "VU Meter" };
+            preferredOrder = { "Color Wash", "VU Meter", "Bars", "Twinkle", "Butterfly", "Spirals", "Pinwheel", "Meteors", "On" };
         } else {
-            preferredOrder = { "Color Wash", "Bars", "VU Meter", "On" };
+            preferredOrder = { "Color Wash", "Bars", "VU Meter", "Twinkle", "Pinwheel", "Spirals", "Butterfly", "Meteors", "On" };
         }
 
         std::vector<std::string> ordered;
@@ -520,6 +527,9 @@ namespace {
         }
         if (ordered.empty()) {
             ordered.push_back("Color Wash");
+        }
+        if (ordered.size() > 8) {
+            ordered.resize(8);
         }
 
         if (ordered.size() > 1) {
@@ -5109,7 +5119,19 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
         runtime.options.style = dialog.GetStylePrompt();
         runtime.options.intensity = dialog.GetIntensity();
         runtime.options.density = dialog.GetDensity();
-        runtime.options.allowedEffects = { "On", "Color Wash", "Bars", "VU Meter" };
+        const std::vector<std::string> preferredEffects = {
+            "On", "Color Wash", "Bars", "VU Meter", "Marquee", "Twinkle", "Pinwheel", "Spirals", "Butterfly", "Meteors"
+        };
+        runtime.options.allowedEffects.clear();
+        runtime.options.allowedEffects.reserve(preferredEffects.size());
+        for (const auto& effectName : preferredEffects) {
+            if (effectManager.GetEffect(effectName) != nullptr) {
+                runtime.options.allowedEffects.push_back(effectName);
+            }
+        }
+        if (runtime.options.allowedEffects.empty()) {
+            runtime.options.allowedEffects = { "On", "Color Wash", "Bars", "VU Meter" };
+        }
         runtime.options.overwritePolicy = "new_layer";
         if (dialog.GetLayerPolicy() == "Merge in open spaces") {
             runtime.options.overwritePolicy = "merge_open";
