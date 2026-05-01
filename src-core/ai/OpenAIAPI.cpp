@@ -211,6 +211,7 @@ aiBase::AIMusicEffectPlan OpenAIAPI::GenerateMusicEffectPlan(
             { "name", t.name },
             { "type", t.type },
             { "modelClass", t.modelClass },
+            { "nameHints", t.aliases },
             { "nodeCount", t.nodeCount },
             { "width", t.width },
             { "height", t.height }
@@ -248,9 +249,11 @@ aiBase::AIMusicEffectPlan OpenAIAPI::GenerateMusicEffectPlan(
         "}\n"
         "Rules:\n"
         "- Use only provided targets.\n"
+        "- Use target names and nameHints to infer what each prop likely represents (tree, star, roofline, matrix, singing face, etc).\n"
         "- Use each target's type/modelClass/nodeCount/width/height to vary choices by model shape.\n"
         "- Avoid cloning identical block timings and effect names across all targets; stagger or alternate where sensible.\n"
         "- Prefer bars/linear style looks for arches/lines, matrix-style looks for matrixes, and broad washes for groups.\n"
+        "- Align transitions to beat/downbeat/section cues from Analysis JSON so effects follow the song structure.\n"
         "- Keep all blocks within requested startMS/endMS.\n"
         "- Ensure endMS > startMS.\n"
         "- Prefer simple settings and leave settings empty if unknown.\n"

@@ -17,6 +17,10 @@ XLIGHTS/NUTCRACKER RELEASE NOTES
     -enh (erock530)             AI music-effect generation now uses model type/class metadata to diversify patterns
                                 across model shapes, and auto-creates an AI_Lyrics timing track (phrases + words)
                                 when no lyric timing track is detected.
+    -enh (erock530)             AI music planning now also uses model-name hints (not just type/class metadata) and
+                                reuses existing beat/section timing tracks in the sequence as song-structure cues.
+    -enh (erock530)             AI music generation now applies audio-aware fade-in/fade-out and suppresses blocks
+                                in very low-audio windows (including quiet tails), reducing "full effects in silence".
     -enh (dkulp)                macOS: MetricKit collector subscribes at launch (macOS 12+) and writes hang / CPU /
                                 disk-write / crash diagnostics + daily metrics as JSON into a Diagnostics/ folder
                                 next to xLights_spdlog.log. Whatever has accumulated since the last submission is

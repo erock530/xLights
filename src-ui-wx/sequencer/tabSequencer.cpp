@@ -10,6 +10,7 @@
 
  #include <algorithm>
  #include <cctype>
+#include <cmath>
  #include <functional>
  #include <map>
  #include <set>
@@ -93,11 +94,24 @@ namespace {
                                                            const std::string& modelClass,
                                                            const std::string& targetName,
                                                            int regenerationCount);
+    static std::vector<std::string> BuildModelNameHints(const std::string& modelName, const std::string& modelClass);
     static bool HasLikelyLyricsTimingTrack(SequenceElements& sequenceElements);
     static bool CreateLyricTimingTrackFromAI(xLightsFrame* frame,
                                              const aiBase::AILyricTrack& lyricTrack,
                                              const std::string& baseName,
                                              std::string* errorMessage);
+
+    struct AudioEnvelopeStats {
+        bool valid = false;
+        int mediaEndMS = 0;
+        int audibleStartMS = 0;
+        int audibleEndMS = 0;
+        int fadeInMS = 1200;
+        int fadeOutMS = 1800;
+        float averageRMS = 0.0F;
+        float peakRMS = 0.0F;
+        float quietThreshold = 0.0F;
+    };
 
     struct MusicGenerationRuntimeData {
         aiBase::AIMusicAnalysis analysis;
@@ -257,21 +271,177 @@ namespace {
         wxButton* ApplyButton = nullptr;
     };
     
-    aiBase::AIMusicAnalysis BuildDeterministicMusicAnalysis(AudioManager* media, int startMS, int endMS, int frameMS)
+    static bool NameContainsAny(const std::string& haystackLower, const std::vector<std::string>& needles)
+    {
+        for (const auto& needle : needles) {
+            if (haystackLower.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static std::vector<int> CollectTimingStartsByKeywords(SequenceElements* sequenceElements,
+                                                          const std::vector<std::string>& keywords,
+                                                          int startMS,
+                                                          int endMS)
+    {
+        std::vector<int> marks;
+        if (sequenceElements == nullptr) {
+            return marks;
+        }
+
+        for (size_t i = 0; i < sequenceElements->GetElementCount(); ++i) {
+            auto* timing = dynamic_cast<TimingElement*>(sequenceElements->GetElement(i));
+            if (timing == nullptr) {
+                continue;
+            }
+            const std::string searchableName = Lower(timing->GetName() + " " + timing->GetSubType());
+            if (!NameContainsAny(searchableName, keywords)) {
+                continue;
+            }
+            for (int layerIdx = 0; layerIdx < timing->GetEffectLayerCount(); ++layerIdx) {
+                auto* layer = timing->GetEffectLayer(layerIdx);
+                if (layer == nullptr) {
+                    continue;
+                }
+                for (const auto* effect : layer->GetAllEffects()) {
+                    if (effect == nullptr) {
+                        continue;
+                    }
+                    int t = effect->GetStartTimeMS();
+                    if (t >= startMS && t < endMS) {
+                        marks.push_back(t);
+                    }
+                }
+            }
+        }
+
+        std::sort(marks.begin(), marks.end());
+        marks.erase(std::unique(marks.begin(), marks.end()), marks.end());
+        return marks;
+    }
+
+    static float SampleAudioRMS(AudioManager* media, int startMS, int endMS)
+    {
+        if (media == nullptr || endMS <= startMS) {
+            return 0.0F;
+        }
+        float minL = 0.0F;
+        float maxL = 0.0F;
+        float rmsL = 0.0F;
+        media->GetLeftDataMinMax(startMS, endMS, minL, maxL, AUDIOSAMPLETYPE::ANY, -1, -1, &rmsL);
+        return std::abs(rmsL);
+    }
+
+    static AudioEnvelopeStats BuildAudioEnvelopeStats(AudioManager* media, int startMS, int endMS, int frameMS)
+    {
+        AudioEnvelopeStats stats;
+        if (media == nullptr) {
+            return stats;
+        }
+
+        const int mediaLength = static_cast<int>(media->LengthMS());
+        const int effectiveEnd = std::min(endMS, mediaLength);
+        if (effectiveEnd <= startMS) {
+            return stats;
+        }
+
+        stats.valid = true;
+        stats.mediaEndMS = effectiveEnd;
+        stats.audibleStartMS = startMS;
+        stats.audibleEndMS = effectiveEnd;
+        const int windowMS = std::max(frameMS * 8, 320);
+
+        std::vector<float> rmsValues;
+        rmsValues.reserve(std::max(4, (effectiveEnd - startMS) / windowMS));
+        for (int t = startMS; t < effectiveEnd; t += windowMS) {
+            const int e = std::min(effectiveEnd, t + windowMS);
+            const float rms = SampleAudioRMS(media, t, e);
+            rmsValues.push_back(rms);
+            stats.averageRMS += rms;
+            stats.peakRMS = std::max(stats.peakRMS, rms);
+        }
+        if (!rmsValues.empty()) {
+            stats.averageRMS /= static_cast<float>(rmsValues.size());
+        }
+
+        stats.quietThreshold = std::max(0.0015F, std::max(stats.averageRMS * 0.22F, stats.peakRMS * 0.05F));
+
+        int firstAudibleIdx = -1;
+        int lastAudibleIdx = -1;
+        for (size_t i = 0; i < rmsValues.size(); ++i) {
+            if (rmsValues[i] >= stats.quietThreshold) {
+                if (firstAudibleIdx < 0) {
+                    firstAudibleIdx = static_cast<int>(i);
+                }
+                lastAudibleIdx = static_cast<int>(i);
+            }
+        }
+
+        if (firstAudibleIdx >= 0) {
+            const int startIdx = std::max(0, firstAudibleIdx - 2);
+            const int endIdx = std::min(static_cast<int>(rmsValues.size()) - 1, lastAudibleIdx + 2);
+            stats.audibleStartMS = startMS + startIdx * windowMS;
+            stats.audibleEndMS = std::min(effectiveEnd, startMS + (endIdx + 1) * windowMS);
+        }
+
+        const int audibleSpan = std::max(frameMS, stats.audibleEndMS - stats.audibleStartMS);
+        stats.fadeInMS = std::clamp(audibleSpan / 9, std::max(frameMS * 2, 700), 4500);
+        stats.fadeOutMS = std::clamp(audibleSpan / 8, std::max(frameMS * 3, 900), 5500);
+        return stats;
+    }
+
+    static float ComputeEnvelopeGain(const AudioEnvelopeStats& stats, int midMS)
+    {
+        if (!stats.valid) {
+            return 1.0F;
+        }
+
+        float gain = 1.0F;
+        if (midMS < stats.audibleStartMS + stats.fadeInMS) {
+            const float denom = static_cast<float>(std::max(1, stats.fadeInMS));
+            gain *= std::clamp((midMS - stats.audibleStartMS) / denom, 0.0F, 1.0F);
+        }
+        if (midMS > stats.audibleEndMS - stats.fadeOutMS) {
+            const float denom = static_cast<float>(std::max(1, stats.fadeOutMS));
+            gain *= std::clamp((stats.audibleEndMS - midMS) / denom, 0.0F, 1.0F);
+        }
+        if (midMS > stats.mediaEndMS) {
+            gain = 0.0F;
+        }
+        return std::clamp(gain, 0.0F, 1.0F);
+    }
+
+    static bool IsHighMotionEffectName(const std::string& effectName)
+    {
+        const std::string lower = Lower(effectName);
+        return lower == "meteors" || lower == "spirals" || lower == "pinwheel" || lower == "butterfly" || lower == "bars";
+    }
+
+    aiBase::AIMusicAnalysis BuildDeterministicMusicAnalysis(AudioManager* media, SequenceElements* sequenceElements, int startMS, int endMS, int frameMS)
     {
         aiBase::AIMusicAnalysis analysis;
         analysis.startMS = startMS;
         analysis.endMS = endMS;
         analysis.bpm = 0.0;
+
+        analysis.beatMS = CollectTimingStartsByKeywords(sequenceElements, { "beat", "tempo", "onset", "pulse" }, startMS, endMS);
+        analysis.downbeatMS = CollectTimingStartsByKeywords(sequenceElements, { "downbeat", "bar", "measure" }, startMS, endMS);
+        analysis.sectionMS = CollectTimingStartsByKeywords(sequenceElements, { "section", "chorus", "verse", "bridge", "phrase", "part" }, startMS, endMS);
     
         if (media != nullptr) {
             TempoResult tempo = DetectTempo(media);
             if (tempo.bpm > 0.0f && !tempo.beatMS.empty()) {
-                analysis.bpm = tempo.bpm;
-                for (auto beat : tempo.beatMS) {
-                    if (beat >= startMS && beat < endMS) {
-                        analysis.beatMS.push_back(static_cast<int>(beat));
+                if (analysis.beatMS.empty()) {
+                    analysis.bpm = tempo.bpm;
+                    for (auto beat : tempo.beatMS) {
+                        if (beat >= startMS && beat < endMS) {
+                            analysis.beatMS.push_back(static_cast<int>(beat));
+                        }
                     }
+                } else {
+                    analysis.bpm = tempo.bpm;
                 }
             }
     
@@ -293,17 +463,21 @@ namespace {
             analysis.bpm = 60000.0 / static_cast<double>(std::max(frameMS, 500));
         }
     
-        for (size_t i = 0; i < analysis.beatMS.size(); ++i) {
-            if ((i % 4) == 0) {
-                analysis.downbeatMS.push_back(analysis.beatMS[i]);
+        if (analysis.downbeatMS.empty()) {
+            for (size_t i = 0; i < analysis.beatMS.size(); ++i) {
+                if ((i % 4) == 0) {
+                    analysis.downbeatMS.push_back(analysis.beatMS[i]);
+                }
             }
         }
         if (analysis.downbeatMS.empty() && !analysis.beatMS.empty()) {
             analysis.downbeatMS.push_back(analysis.beatMS.front());
         }
     
-        for (size_t i = 0; i < analysis.downbeatMS.size(); i += 4) {
-            analysis.sectionMS.push_back(analysis.downbeatMS[i]);
+        if (analysis.sectionMS.empty()) {
+            for (size_t i = 0; i < analysis.downbeatMS.size(); i += 4) {
+                analysis.sectionMS.push_back(analysis.downbeatMS[i]);
+            }
         }
         if (analysis.sectionMS.empty() || analysis.sectionMS.back() != endMS) {
             analysis.sectionMS.push_back(endMS);
@@ -487,7 +661,10 @@ namespace {
             baseCycle = { "Color Wash", "Bars", "VU Meter", "On" };
         }
 
-        const std::string lowerClass = Lower(modelClass);
+        std::string lowerClass = Lower(modelClass);
+        for (const auto& hint : BuildModelNameHints(targetName, modelClass)) {
+            lowerClass += " " + hint;
+        }
         std::vector<std::string> preferredOrder;
         if (ContainsClassToken(lowerClass, "matrix") || ContainsClassToken(lowerClass, "pixelplane")) {
             preferredOrder = { "Bars", "VU Meter", "Color Wash", "Pinwheel", "Spirals", "Butterfly", "Twinkle", "Meteors", "On" };
@@ -538,6 +715,48 @@ namespace {
         }
 
         return ordered;
+    }
+
+    static std::vector<std::string> BuildModelNameHints(const std::string& modelName, const std::string& modelClass)
+    {
+        std::set<std::string> hints;
+        const std::string searchable = Lower(modelClass + " " + modelName);
+
+        auto addIfFound = [&](const std::string& token, const std::string& hint) {
+            if (searchable.find(token) != std::string::npos) {
+                hints.insert(hint);
+            }
+        };
+
+        addIfFound("tree", "tree");
+        addIfFound("mega", "tree");
+        addIfFound("matrix", "matrix");
+        addIfFound("panel", "matrix");
+        addIfFound("pixel", "pixel");
+        addIfFound("arch", "arches");
+        addIfFound("line", "line");
+        addIfFound("roof", "line");
+        addIfFound("window", "line");
+        addIfFound("outline", "line");
+        addIfFound("star", "star");
+        addIfFound("snowflake", "snowflake");
+        addIfFound("flake", "snowflake");
+        addIfFound("wreath", "wreath");
+        addIfFound("spinner", "spinner");
+        addIfFound("cane", "cane");
+        addIfFound("sing", "faces");
+        addIfFound("face", "faces");
+        addIfFound("drum", "rhythm");
+        addIfFound("beat", "rhythm");
+        addIfFound("house", "house");
+        addIfFound("guitar", "instrument");
+        addIfFound("piano", "instrument");
+
+        if (hints.empty()) {
+            hints.insert("generic");
+        }
+
+        return std::vector<std::string>(hints.begin(), hints.end());
     }
 
     static bool IsLikelyLyricToken(const std::string& token)
@@ -5175,14 +5394,16 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
                 info.strandCount = std::max(0, model->GetNumStrands());
                 info.width = model->GetDefaultBufferWi();
                 info.height = model->GetDefaultBufferHt();
+                info.aliases = BuildModelNameHints(target->GetModelName(), info.modelClass);
             } else {
                 info.type = "Model";
                 info.modelClass = "Model";
+                info.aliases = BuildModelNameHints(target->GetModelName(), info.modelClass);
             }
             runtime.targetInfos.push_back(std::move(info));
         }
 
-        runtime.analysis = BuildDeterministicMusicAnalysis(CurrentSeqXmlFile->GetMedia(), runtime.options.startMS, runtime.options.endMS, frameMS);
+        runtime.analysis = BuildDeterministicMusicAnalysis(CurrentSeqXmlFile->GetMedia(), &_sequenceElements, runtime.options.startMS, runtime.options.endMS, frameMS);
         aiBase::AIMusicEffectPlan plan;
         usedAIPlanner = false;
         const int serviceSelection = dialog.GetSelectedServiceIndex();
@@ -5225,6 +5446,7 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
         };
 
         std::map<std::string, int> warningCounts;
+        const AudioEnvelopeStats audioEnvelope = BuildAudioEnvelopeStats(CurrentSeqXmlFile->GetMedia(), runtime.options.startMS, runtime.options.endMS, frameMS);
         std::vector<aiBase::AIEffectBlock> validatedBlocks;
         validatedBlocks.reserve(plan.blocks.size());
         for (auto& block : plan.blocks) {
@@ -5246,6 +5468,30 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
                 warningCounts["zero_length"]++;
                 continue;
             }
+
+            if (audioEnvelope.valid) {
+                const int blockMid = block.startMS + (block.endMS - block.startMS) / 2;
+                const float envelopeGain = ComputeEnvelopeGain(audioEnvelope, blockMid);
+                const float blockRMS = SampleAudioRMS(CurrentSeqXmlFile->GetMedia(), block.startMS, block.endMS);
+                const bool quiet = blockRMS < audioEnvelope.quietThreshold;
+                const bool tailQuiet = (blockMid > (audioEnvelope.audibleEndMS + frameMS * 2)) &&
+                                       (blockRMS < (audioEnvelope.quietThreshold * 0.85F));
+
+                if (tailQuiet) {
+                    warningCounts["quiet_suppressed"]++;
+                    continue;
+                }
+                if (quiet && envelopeGain < 0.15F) {
+                    const size_t h = std::hash<std::string>{}(block.targetName + "|" + block.effectName + "|" + std::to_string(block.startMS));
+                    if ((h % 4) == 0) {
+                        warningCounts["quiet_suppressed"]++;
+                        continue;
+                    }
+                }
+                if ((quiet || envelopeGain < 0.25F) && IsHighMotionEffectName(block.effectName)) {
+                    block.effectName = "Color Wash";
+                }
+            }
             validatedBlocks.push_back(std::move(block));
         }
 
@@ -5262,6 +5508,10 @@ void xLightsFrame::GenerateAIMusicEffects(wxCommandEvent& /* command */) {
             if (StartsWith(k, "unknown_target:")) {
                 const std::string targetName = k.substr(15);
                 plan.warnings.push_back(wxString::Format("Skipping %d block(s) with unknown target '%s'.", count, targetName.c_str()).ToStdString());
+                continue;
+            }
+            if (k == "quiet_suppressed") {
+                plan.warnings.push_back(wxString::Format("Suppressed %d block(s) in very low-audio windows (primarily quiet tails).", count).ToStdString());
             }
         }
 
