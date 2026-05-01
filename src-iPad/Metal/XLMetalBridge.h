@@ -76,4 +76,20 @@
 - (BOOL)fitModelNamed:(NSString*)name
           forDocument:(XLSequenceDocument*)doc;
 
+// Diagnostic surface for the SwiftUI preview pane. `errorReason`
+// returns the most recent silent-fail reason (no Metal layer, 0×0
+// drawable, render context missing, StartDrawing failed, no models
+// to draw, etc.) or nil when everything's fine. `hasRenderedSuccessfully`
+// flips true after the first frame that completes through
+// `EndDrawing`. Together they let the SwiftUI view distinguish
+// "still warming up" (no error, hasRendered=false) from "actually
+// broken" (errorReason set, hasRendered=false for ≥ a couple of
+// seconds).
+//
+// Each unique error is also logged via spdlog at WARN level on first
+// occurrence, so iPad → Tools → Package Logs captures the failure
+// for tester reports.
+- (nullable NSString*)errorReason;
+- (BOOL)hasRenderedSuccessfully;
+
 @end

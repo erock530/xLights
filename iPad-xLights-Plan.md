@@ -179,12 +179,23 @@ quality" section unless noted otherwise.
   socket probe, OS / preferences, HTML output, OpenGL core-
   profile shader guard, BadDriveAccess) and delegates the rest
   through `DesktopCheckCallbacks`.
-- **Incompatible-video warning at sequence load** (P1, S).
-  Per-effect probe already exists; needs a load-time sweep so
-  testers don't get silent black frames mid-playback.
-- **Re-prompt on failed `ObtainAccessToURL`** (P1, S). Currently
-  logs and silently degrades. `UIDocumentPickerViewController`
-  fallback turns iCloud-eviction failures into one-tap recovery.
+- ✓ **Incompatible-video warning at sequence load** —
+  `mediaInventoryInSequence` now runs the AVFoundation probe via
+  `MediaCompatibility::CheckVideoFile` on every video entry whose
+  file exists, rolling codec-incompatible videos (VP9, AV1,
+  ProRes-RAW, …) into `isBroken` alongside missing files. The
+  red "X media files have issues" banner across the top fires for
+  both. Media Manager inventory chip says "Missing" or
+  "Unsupported" depending on the failure mode.
+- ✓ **Re-prompt on failed `ObtainAccessToURL`** —
+  `SequencerViewModel.loadShowFolder` pre-checks every show /
+  media folder path with `XLSequenceDocument.obtainAccess(toPath:)`
+  before calling into C++. Stale paths queue an
+  `AccessRepromptRequest`; the `AccessRepromptSheet` presents a
+  `UIDocumentPickerViewController` so the user re-grants access,
+  and the C++ load only runs once the queue drains. Folders that
+  still can't be accessed are dropped (matches the prior silent-drop
+  behaviour, but now the user actually sees what happened).
 
 **P2 — feature additions worth a tester sprint**:
 

@@ -5020,8 +5020,26 @@ NSString* OptionalString(const std::string& s) {
         }
 
         BOOL broken = NO;
+        std::string brokenReason;
         if (!embedded) {
-            broken = FileExists(resolved) ? NO : YES;
+            if (!FileExists(resolved)) {
+                broken = YES;
+                brokenReason = "missing";
+            } else if (p.second == MediaType::Video) {
+                // File is present but might still be undecodable —
+                // VP9, AV1, ProRes-RAW, etc. Reuse the same
+                // AVFoundation probe the per-effect inspector and
+                // SequenceChecker use; non-empty reason → roll up
+                // into the missing-media banner so the user sees
+                // it at sequence load instead of getting silent
+                // black frames mid-playback.
+                ObtainAccessToURL(resolved, false);
+                std::string reason = MediaCompatibility::CheckVideoFile(resolved);
+                if (!reason.empty()) {
+                    broken = YES;
+                    brokenReason = reason;
+                }
+            }
         }
 
         int widthPx = 0, heightPx = 0, frameCount = 0;
@@ -5052,6 +5070,8 @@ NSString* OptionalString(const std::string& s) {
             @"resolvedPath": resolvedStr ?: @"",
             @"isEmbedded":   @(embedded),
             @"isBroken":     @(broken),
+            @"brokenReason": brokenReason.empty()
+                ? @"" : [NSString stringWithUTF8String:brokenReason.c_str()],
             @"widthPx":      @(widthPx),
             @"heightPx":     @(heightPx),
             @"frameCount":   @(frameCount),

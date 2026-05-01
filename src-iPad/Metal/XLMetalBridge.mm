@@ -29,7 +29,9 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <set>
 #include <string>
+#include <spdlog/spdlog.h>
 
 #define PIXEL_SIZE_ON_DIALOGS 2.0
 
@@ -54,6 +56,14 @@
     std::string _bgLoadedPath;
     int _bgImageWidth;
     int _bgImageHeight;
+    // Diagnostics — most-recent silent-fail reason, set on every draw
+    // attempt and cleared on success. `_loggedReasons` ensures we only
+    // log each unique failure once per bridge lifetime so a per-frame
+    // failure doesn't flood the log; the field stays current even
+    // when nothing's logging.
+    NSString* _errorReason;
+    BOOL _hasRenderedSuccessfully;
+    std::set<std::string> _loggedReasons;
 }
 
 - (instancetype)initWithName:(NSString*)name {
@@ -72,6 +82,8 @@
         _bgTexture = nullptr;
         _bgImageWidth = 0;
         _bgImageHeight = 0;
+        _errorReason = nil;
+        _hasRenderedSuccessfully = NO;
         // Model preview defaults to 2D (fit-to-window single-model view); the
         // House preview keeps the 3D default.
         if (_isModelPreview) {
@@ -84,7 +96,41 @@
 - (void)dealloc {
     delete _bgTexture;
     _bgTexture = nullptr;
+    [_errorReason release];
     [super dealloc];
+}
+
+- (NSString*)errorReason {
+    return _errorReason;
+}
+
+- (BOOL)hasRenderedSuccessfully {
+    return _hasRenderedSuccessfully;
+}
+
+/// Note a silent-fail reason so SwiftUI can surface it. Logs once per
+/// unique reason per bridge lifetime so a per-frame failure (eg.
+/// "drawable size 0×0" while the layer is being sized) doesn't spam
+/// the log; the field stays current regardless so the SwiftUI
+/// banner reflects the latest state.
+- (void)setErrorReasonInternal:(NSString*)reason {
+    NSString* canonical = reason ?: @"";
+    if (_errorReason && [_errorReason isEqualToString:canonical]) return;
+    [_errorReason release];
+    _errorReason = [canonical copy];
+    if (canonical.length > 0) {
+        std::string s = std::string([canonical UTF8String]);
+        if (_loggedReasons.insert(s).second) {
+            std::string n = _preview ? _preview->GetName() : "Preview";
+            spdlog::warn("XLMetalBridge[{}]: {}", n, s);
+        }
+    }
+}
+
+- (void)clearErrorReason {
+    if (_errorReason && _errorReason.length == 0) return;
+    [_errorReason release];
+    _errorReason = nil;
 }
 
 /// Load an image file into an xlImage using ImageIO (CGImageSource). The
@@ -520,11 +566,22 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
 }
 
 - (void)drawModelsForDocument:(XLSequenceDocument*)doc atMS:(int)frameMS pointSize:(float)pointSize {
-    if (_canvas->getMetalLayer() == nil) return;
-    if (_canvas->getWidth() == 0 || _canvas->getHeight() == 0) return;
+    if (_canvas->getMetalLayer() == nil) {
+        [self setErrorReasonInternal:@"No Metal layer attached"];
+        return;
+    }
+    if (_canvas->getWidth() == 0 || _canvas->getHeight() == 0) {
+        [self setErrorReasonInternal:
+            [NSString stringWithFormat:@"Drawable size is %dx%d (waiting for layout)",
+                _canvas->getWidth(), _canvas->getHeight()]];
+        return;
+    }
 
     iPadRenderContext* ctx = static_cast<iPadRenderContext*>([doc renderContext]);
-    if (!ctx) return;
+    if (!ctx) {
+        [self setErrorReasonInternal:@"No render context (no document loaded)"];
+        return;
+    }
 
     // Set channel data on all models for this frame
     ctx->SetModelColors(frameMS);
@@ -549,7 +606,11 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
     }
 
     // Start a single drawing pass — acquires one drawable
-    if (!_preview->StartDrawing(pointSize)) return;
+    if (!_preview->StartDrawing(pointSize)) {
+        [self setErrorReasonInternal:
+            [NSString stringWithUTF8String:_preview->GetLastStartDrawingFailure().c_str()]];
+        return;
+    }
 
     auto* graphicsCtx = _preview->getCurrentGraphicsContext();
     auto* solidProg = _preview->getCurrentSolidProgram();
@@ -568,11 +629,17 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
         // positions, not their world positions. If nothing is selected, the
         // pane stays black (clear-only) — we intentionally do NOT fall through
         // to the full-house path.
-        if (!_previewModel.empty()) {
+        if (_previewModel.empty()) {
+            [self setErrorReasonInternal:@"No model selected"];
+        } else {
             auto& models = ctx->GetModelManager();
             Model* m = models[_previewModel];
             if (m) {
                 m->DisplayEffectOnWindow(_preview.get(), pointSize);
+            } else {
+                [self setErrorReasonInternal:
+                    [NSString stringWithFormat:@"Model '%s' not found in layout",
+                        _previewModel.c_str()]];
             }
         }
     } else {
@@ -597,6 +664,14 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
         }
 
         std::vector<Model*> models = ctx->GetModelsForActivePreview();
+        if (models.empty()) {
+            // Could be a freshly-loaded show with no models, an empty
+            // layout group, or — most often — the show folder load
+            // hasn't populated models yet. SwiftUI surfaces the
+            // reason; the actual draw still completes (cleared
+            // background) so we don't paint over the message.
+            [self setErrorReasonInternal:@"No models in active preview"];
+        }
         const glm::mat4& viewMatrix = _preview->GetViewMatrix();
         std::vector<std::pair<Model*, float>> keyed;
         keyed.reserve(models.size());
@@ -640,6 +715,17 @@ static bool AccumulateModelBounds(Model* m, float& minX, float& minY,
 
     // Finish and present
     _preview->EndDrawing(true);
+
+    // Clear the diagnostic banner once a frame has actually rendered.
+    // Note: a "No model selected" / "No models in active preview"
+    // state is technically a successful draw (clear-to-background),
+    // so we keep `_errorReason` set in those branches but still flip
+    // `_hasRenderedSuccessfully` — the SwiftUI overlay treats these
+    // as informational rather than failure.
+    _hasRenderedSuccessfully = YES;
+    if (!_errorReason || _errorReason.length == 0) {
+        [self clearErrorReason];
+    }
 }
 
 // Lazy-load + enqueue the 2D background draw. No-op when no path is

@@ -23,13 +23,6 @@ phase home; catalogued here so they don't fall off.
   `ShaderConfig::GetDynamicPropertiesJson()` so grouping carries
   across. Deferred until a real shader pack trips the issue. P2.
 
-- **Video compat badge in the media manager.** Per-effect block
-  already calls `videoCompatibilityIssueForPath:`; the sequence-wide
-  Media Manager inventory list still labels incompatible videos as
-  plain "External". Badging them requires caching the
-  `CheckVideoFile` probe per entry so the inventory refresh doesn't
-  re-open every video. Low priority.
-
 ## Phase H — App Store
 
 - **sACN multicast entitlement.** `com.apple.developer.networking.multicast`
@@ -46,15 +39,6 @@ report will need this" items the gap analysis (2026-04-23) flagged.
 Each is a near-trivial addition that materially improves the
 tester loop. Pull into MVP if there's bandwidth before H-5 wraps.
 
-- **Log export** (gap-analysis H-3, **P0 for TestFlight**). Zip
-  the spdlog rotate-files + show folder + currently-open `.xsq`
-  and present via `UIActivityViewController`. Without it, "weird
-  thing happened" reports come back with nothing actionable.
-- **Incompatible video warning at sequence load** (A-8, P1).
-  Per-effect probe `videoCompatibilityIssueForPath:` already
-  exists; sequence-load pass needs to walk every VideoEffect and
-  surface a one-shot summary so the tester knows up front instead
-  of getting silent black frames mid-playback.
 - **Recent Show Folders list** (L-1b). Recent Sequences is
   scoped per show folder (2026-04-30 refactor — flipping shows
   swaps the picker's recent list cleanly), but the folder-config

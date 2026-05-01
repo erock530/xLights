@@ -1,5 +1,48 @@
 import SwiftUI
 import MetalKit
+import Observation
+
+/// Diagnostic state surfaced by the preview pane to its host view.
+/// `XLMetalBridge` reports each silent-fail reason via `errorReason`;
+/// the coordinator copies it here on every draw attempt. The host
+/// reads `bannerMessage` — non-nil iff the failure has persisted past
+/// a small grace period, so transient init failures (drawable not yet
+/// sized, document not loaded yet) don't flicker the banner.
+@MainActor
+@Observable
+final class PreviewStatus {
+    /// Latest reason from the bridge, or `nil` when the most recent
+    /// frame drew cleanly. Bare reason text is set by the bridge —
+    /// e.g. "No Metal layer attached", "Drawable size is 0x0
+    /// (waiting for layout)", "No model selected".
+    fileprivate(set) var errorReason: String? = nil
+    /// True after the first frame that completed `EndDrawing`.
+    fileprivate(set) var hasRenderedSuccessfully: Bool = false
+    /// Wall-clock deadline; while now < deadline, suppress the banner.
+    /// Set to `now + initialGrace` whenever a fresh error appears.
+    private var bannerDeadline: Date = .distantFuture
+    private static let initialGrace: TimeInterval = 1.0
+
+    func update(reason: String?, rendered: Bool) {
+        let cleaned = (reason?.isEmpty == false) ? reason : nil
+        if cleaned != errorReason {
+            errorReason = cleaned
+            // New error → start a fresh grace period; cleared error
+            // → no deadline at all so banner clears immediately.
+            bannerDeadline = (cleaned != nil)
+                ? Date().addingTimeInterval(Self.initialGrace)
+                : .distantFuture
+        }
+        hasRenderedSuccessfully = rendered
+    }
+
+    /// What the host view should render. nil = no banner.
+    var bannerMessage: String? {
+        guard let reason = errorReason else { return nil }
+        if Date() < bannerDeadline { return nil }
+        return reason
+    }
+}
 
 /// Shared preview pane — wraps an MTKView backed by an `XLMetalBridge` and
 /// routes gestures (pinch to zoom, drag to pan/orbit, double-tap to reset)
@@ -16,6 +59,11 @@ struct PreviewPaneView: UIViewRepresentable {
     let previewModelName: String?
     @Binding var controlsVisible: Bool
     let settings: PreviewSettings
+    /// Optional diagnostic surface. When non-nil, the coordinator
+    /// posts the bridge's error state into it on every draw so the
+    /// host view (HousePreviewView et al.) can paint a banner over
+    /// the pane when the preview can't render.
+    let status: PreviewStatus?
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -90,6 +138,7 @@ struct PreviewPaneView: UIViewRepresentable {
     func updateUIView(_ uiView: MTKView, context: Context) {
         context.coordinator.viewModel = viewModel
         context.coordinator.settings = settings
+        context.coordinator.status = status
         context.coordinator.bridge?.setPreviewModel(previewModelName ?? "")
 
         // Push appearance toggles that the bridge needs to know about. Mode
@@ -125,6 +174,7 @@ struct PreviewPaneView: UIViewRepresentable {
         var bridge: XLMetalBridge?
         var viewModel: SequencerViewModel?
         var settings: PreviewSettings?
+        var status: PreviewStatus?
         weak var mtkView: MTKView?
         // nonisolated(unsafe): touched from the nonisolated deinit. Real use is
         // main-thread-only (set/invalidated from display-link lifecycle calls).
@@ -505,6 +555,14 @@ struct PreviewPaneView: UIViewRepresentable {
         func draw(in view: MTKView) {
             guard let viewModel, let bridge else { return }
             bridge.drawModels(for: viewModel.document, atMS: Int32(viewModel.playPositionMS), pointSize: 2.0)
+            // Post the bridge's diagnostic state to the host so the
+            // overlay banner can decide whether to surface a message.
+            // Cheap (two property reads) and the @Observable update
+            // collapses to a no-op when the values haven't changed.
+            if let status {
+                status.update(reason: bridge.errorReason(),
+                              rendered: bridge.hasRenderedSuccessfully())
+            }
         }
 
         deinit {

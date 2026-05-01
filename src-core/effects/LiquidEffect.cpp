@@ -10,11 +10,15 @@
 
 #include "LiquidEffect.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <spdlog/fmt/fmt.h>
 #include <Box2D/Box2D.h>
 #include "../render/Effect.h"
+#include "../render/EffectLayer.h"
+#include "../render/Element.h"
 #include "../render/RenderBuffer.h"
+#include "../render/SequenceElements.h"
 #include "../render/ValueCurve.h"
 #include "UtilClasses.h"
 #include "media/AudioManager.h"
@@ -43,7 +47,7 @@ int LiquidEffect::sLifeTimeDefault = 1000;
 int LiquidEffect::sLifeTimeMin = 0;
 int LiquidEffect::sLifeTimeMax = 1000;
 int LiquidEffect::sSizeDefault = 500;
-int LiquidEffect::sWarmUpFramesDefault = 0;
+int LiquidEffect::sWarmUpTimeDefault = 0;
 int LiquidEffect::sDespeckleDefault = 0;
 double LiquidEffect::sGravityDefault = 10.0;
 double LiquidEffect::sGravityMin = -1000;
@@ -118,7 +122,7 @@ void LiquidEffect::OnMetadataLoaded()
     sLifeTimeMin = (int)GetMinFromMetadata("LifeTime", sLifeTimeMin);
     sLifeTimeMax = (int)GetMaxFromMetadata("LifeTime", sLifeTimeMax);
     sSizeDefault = GetIntDefault("Size", sSizeDefault);
-    sWarmUpFramesDefault = GetIntDefault("WarmUpFrames", sWarmUpFramesDefault);
+    sWarmUpTimeDefault = GetIntDefault("WarmUpTime", sWarmUpTimeDefault);
     sDespeckleDefault = GetIntDefault("Despeckle", sDespeckleDefault);
     sGravityDefault = GetDoubleDefault("Liquid_Gravity", sGravityDefault);
     sGravityMin = GetMinFromMetadata("Liquid_Gravity", sGravityMin);
@@ -196,32 +200,117 @@ void LiquidEffect::adjustSettings(const std::string& version, Effect* effect, bo
 
     SettingsMap& settings = effect->GetSettings();
 
-    // 2026.08: velocity scaling factor changed from * 10 to / 10 to make
-    // the slider's range usable. Old physical = velocity_user * 10, new
-    // physical = velocity_user / 10. Multiply the stored user velocity
-    // by 100 so existing sequences keep producing the same physical
-    // velocity (and thus the same visual). Both the slider value and
-    // the value curve get migrated.
+    // 2026.08: Liquid effect went frame-rate independent. Sequences
+    // saved before this used per-frame semantics; we need the original
+    // sequence frame rate to convert them so old sequences render
+    // visually identically at any new frame rate.
     if (IsVersionOlder("2026.07.1", version)) {
+        // Look up the sequence's frame interval. Defaults to 50ms (the
+        // long-time historical default) if anything in the chain is
+        // missing — adjustSettings can run in contexts where the
+        // effect isn't fully attached yet.
+        int oldFrameMs = 50;
+        if (effect != nullptr) {
+            EffectLayer* layer = effect->GetParentEffectLayer();
+            if (layer != nullptr) {
+                Element* element = layer->GetParentElement();
+                if (element != nullptr) {
+                    SequenceElements* seqElems = element->GetSequenceElements();
+                    if (seqElems != nullptr) {
+                        const int fm = seqElems->GetFrameMS();
+                        if (fm > 0) oldFrameMs = fm;
+                    }
+                }
+            }
+        }
+        const float oldFps = 1000.0F / static_cast<float>(oldFrameMs);
+
+        auto migrate = [&](const char* keyBase, float scale, long minVal, long maxVal) {
+            for (int n = 1; n <= 4; ++n) {
+                const std::string sliderKey = fmt::format("E_TEXTCTRL_{}{}", keyBase, n);
+                const std::string vcKey = fmt::format("E_VALUECURVE_{}{}", keyBase, n);
+
+                const std::string slider = settings.Get(sliderKey, "");
+                if (!slider.empty()) {
+                    const long oldVal = std::strtol(slider.c_str(), nullptr, 10);
+                    const long newVal = std::min<long>(static_cast<long>(oldVal * scale), maxVal);
+                    settings[sliderKey] = std::to_string(newVal);
+                }
+
+                const std::string vc = settings.Get(vcKey, "");
+                if (!vc.empty()) {
+                    ValueCurve valc;
+                    valc.SetDivisor(1.0F);
+                    valc.SetLimits(static_cast<float>(minVal), static_cast<float>(maxVal));
+                    valc.Deserialise(vc);
+                    valc.ScaleAndOffsetValues(scale, 0);
+                    settings[vcKey] = valc.Serialise();
+                }
+            }
+        };
+
+        // Velocity went from physical = user × 10 to physical = user / 10.
+        // Multiply stored user value by 100 to preserve physical motion.
+        // Frame-rate independent (always was — velocity is in buf-u/sec).
+        migrate("Velocity", 100.0F, sVelocityMin, sVelocityMax);
+
+        // Flow went from particles-per-frame to particles-per-second
+        // (mapped through the linear+exponential curve). Old per-frame
+        // value V at oldFps becomes per-sec V × oldFps. Slider maps
+        // particles/sec via curve: 0..500 linear (slope 4), 500..1000
+        // exponential. We invert the curve to find the new slider
+        // value that gives the same per-sec rate.
         for (int n = 1; n <= 4; ++n) {
-            const std::string sliderKey = fmt::format("E_TEXTCTRL_Velocity{}", n);
-            const std::string vcKey = fmt::format("E_VALUECURVE_Velocity{}", n);
+            const std::string sliderKey = fmt::format("E_TEXTCTRL_Flow{}", n);
+            const std::string vcKey = fmt::format("E_VALUECURVE_Flow{}", n);
+
+            auto perSecToSlider = [](float perSec) -> long {
+                if (perSec <= 0.0F) return 0;
+                if (perSec <= 2000.0F) return static_cast<long>(perSec * 0.25F);  // inverse of slider*4
+                // 500 + 500 * log10(perSec / 2000)
+                const float t = std::log10(perSec / 2000.0F);
+                return std::min<long>(500L + static_cast<long>(500.0F * t), 1000L);
+            };
 
             const std::string slider = settings.Get(sliderKey, "");
             if (!slider.empty()) {
                 const long oldVal = std::strtol(slider.c_str(), nullptr, 10);
-                const long newVal = std::min<long>(oldVal * 100, sVelocityMax);
-                settings[sliderKey] = std::to_string(newVal);
+                const float oldPerSec = static_cast<float>(oldVal) * oldFps;
+                settings[sliderKey] = std::to_string(perSecToSlider(oldPerSec));
             }
 
             const std::string vc = settings.Get(vcKey, "");
             if (!vc.empty()) {
+                // Value curves store points scaled to [min, max]. Old
+                // points were V (per-frame); new points need to be
+                // perSecToSlider(V × oldFps). Approximate by scaling
+                // the whole curve linearly — accurate inside the
+                // linear half of the new curve, slightly compressed in
+                // the exponential half. Most users keep flow value
+                // curves below the exponential breakpoint anyway, so
+                // this is close enough.
                 ValueCurve valc;
                 valc.SetDivisor(1.0F);
-                valc.SetLimits(sVelocityMin, sVelocityMax);
+                valc.SetLimits(static_cast<float>(sFlowMin), static_cast<float>(sFlowMax));
                 valc.Deserialise(vc);
-                valc.ScaleAndOffsetValues(100.0F, 0);
+                // V/frame × oldFps = perSec; perSec / 4 = slider (linear half).
+                valc.ScaleAndOffsetValues(oldFps * 0.25F, 0);
                 settings[vcKey] = valc.Serialise();
+            }
+        }
+
+        // WarmUpFrames (count of frames at oldFps) → WarmUpTime
+        // (hundredths of a second). 100 hundredths = 1 sec, so
+        // hundredths = frames * (100 / oldFps) = frames * oldFrameMs / 10.
+        {
+            const std::string oldKey = "E_TEXTCTRL_WarmUpFrames";
+            const std::string newKey = "E_TEXTCTRL_WarmUpTime";
+            const std::string slider = settings.Get(oldKey, "");
+            if (!slider.empty()) {
+                const long oldVal = std::strtol(slider.c_str(), nullptr, 10);
+                const long newVal = std::min<long>(oldVal * oldFrameMs / 10, 2500L);
+                settings[newKey] = std::to_string(newVal);
+                settings.erase(oldKey);
             }
         }
     }
@@ -246,11 +335,21 @@ std::list<std::string> LiquidEffect::CheckEffectSettings(const SettingsMap& sett
         lifetimeFrames = (eff->GetEndTimeMS() - eff->GetStartTimeMS()) / frameInterval;
     }
     lifetimeFrames = std::min(lifetimeFrames, (eff->GetEndTimeMS() - eff->GetStartTimeMS()) / frameInterval);
-    int flow1 = GetValueCurveIntMax("Flow1", sFlow1Default, settings, sFlowMin, sFlowMax);
+    // Flow is now in particles-per-second (frame-rate independent),
+    // mapped through linear/exponential curve. Estimated steady-state
+    // particle count = lifetime_seconds * total_per_sec, which is
+    // independent of frame rate.
+    auto flowToPerSec = [](int u) -> float {
+        if (u <= 500) return (float)u * 4.0f;
+        return 2000.0f * std::pow(10.0f, (float)(u - 500) * 0.002f);
+    };
+    int flow1 = settings.GetBool("E_CHECKBOX_Enabled1", sEnabled1Default) ? GetValueCurveIntMax("Flow1", sFlow1Default, settings, sFlowMin, sFlowMax) : 0;
     int flow2 = settings.GetBool("E_CHECKBOX_Enabled2", sEnabled2Default) ? GetValueCurveIntMax("Flow2", sFlow2Default, settings, sFlowMin, sFlowMax) : 0;
     int flow3 = settings.GetBool("E_CHECKBOX_Enabled3", sEnabled3Default) ? GetValueCurveIntMax("Flow3", sFlow3Default, settings, sFlowMin, sFlowMax) : 0;
     int flow4 = settings.GetBool("E_CHECKBOX_Enabled4", sEnabled4Default) ? GetValueCurveIntMax("Flow4", sFlow4Default, settings, sFlowMin, sFlowMax) : 0;
-    int count = lifetimeFrames * (flow1 + flow2 + flow3 + flow4);
+    const float totalPerSec = flowToPerSec(flow1) + flowToPerSec(flow2) + flowToPerSec(flow3) + flowToPerSec(flow4);
+    const float lifetimeSec = (float)lifetimeFrames * (float)frameInterval / 1000.0f;
+    int count = (int)(lifetimeSec * totalPerSec);
 
     if (count > MAX_PARTICLES) {
         res.push_back(fmt::format("    WARN: Liquid effect lifetime * (flow 1 + flow 2 + flow 3 + flow 4) = {} exceeds {}. Particle count will be limited. Model '{}', Start {}", count, MAX_PARTICLES, model->GetFullName(), FORMATTIME(eff->GetStartTimeMS())));
@@ -276,7 +375,7 @@ void LiquidEffect::Render(Effect* effect, const SettingsMap& SettingsMap, Render
            SettingsMap.GetBool("CHECKBOX_HoldColor", sHoldColorDefault),
            SettingsMap.GetBool("CHECKBOX_MixColors", sMixColorsDefault),
            SettingsMap.GetInt("TEXTCTRL_Size", sSizeDefault),
-           SettingsMap.GetInt("TEXTCTRL_WarmUpFrames", sWarmUpFramesDefault),
+           SettingsMap.GetInt("TEXTCTRL_WarmUpTime", sWarmUpTimeDefault),
 
            SettingsMap.GetBool("CHECKBOX_Enabled1", sEnabled1Default),
            GetValueCurveInt("Direction1", sDirection1Default, SettingsMap, oset, sDirectionMin, sDirectionMax, buffer.GetStartTimeMS(), buffer.GetEndTimeMS()),
@@ -327,6 +426,11 @@ public:
         if (_world != nullptr) delete _world;
 	};
     b2World* _world;
+    // Sub-particle flow accumulator per emitter. Slider values are
+    // user-units that resolve to particles per 10 frames; fractional
+    // amounts persist across frames so a low slider produces an
+    // occasional emit instead of either nothing or a constant stream.
+    float _flowAccumulator[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
 
 void LiquidEffect::CreateBarrier(b2World* world, float x, float y, float width, float height)
@@ -466,7 +570,7 @@ xlColor LiquidEffect::GetDespeckleColor(RenderBuffer& buffer, size_t x, size_t y
     return xlColor(red / count, green / count, blue / count);
 }
 
-void LiquidEffect::CreateParticles(b2ParticleSystem* ps, int x, int y, int direction, int velocity, int flow, bool flowMusic, int lifetime, int width, int height, const xlColor& c, const std::string& particleType, bool mixcolors, float audioLevel, int sourceSize)
+void LiquidEffect::CreateParticles(b2ParticleSystem* ps, int x, int y, int direction, int velocity, int flow, bool flowMusic, int lifetime, int width, int height, const xlColor& c, const std::string& particleType, bool mixcolors, float audioLevel, int sourceSize, float& flowAccumulator, float dt)
 {
     static const float pi2 = 6.283185307f;
     float posx = (float)x * (float)width / 100.0;
@@ -492,11 +596,30 @@ void LiquidEffect::CreateParticles(b2ParticleSystem* ps, int x, int y, int direc
     // if lifetime is 1000 ... then we live for 10 seconds
     float lt = lifetime / 100.0;
 
-    int count = flow;
-    if (flowMusic)
-    {
-        count *= audioLevel;
+    // Flow → particles-per-second curve (frame-rate independent):
+    //   slider   0..500  → linear,      0..2000  particles/sec
+    //   slider 500..1000 → exponential, 2000..20000 particles/sec
+    //                       (2000 * 10^((u-500)/500))
+    // The linear half gives fine-grained low-end control (smallest
+    // visible step = 4 particles/sec); the exponential half restores
+    // dramatic high emit rates without hitting MAX_PARTICLES too fast.
+    // Each frame we accumulate flowPerSec × dt (= particles to emit
+    // this frame), and emit floor(accumulator) particles, carrying the
+    // fractional remainder into the next frame. Result: visual
+    // emission rate is identical at any sequence frame rate.
+    float flowPerSec;
+    if (flow <= 500) {
+        flowPerSec = (float)flow * 4.0f;
+    } else {
+        flowPerSec = 2000.0f * std::pow(10.0f, (float)(flow - 500) * 0.002f);
     }
+    if (flowMusic) {
+        flowPerSec *= audioLevel;
+    }
+    flowAccumulator += flowPerSec * dt;
+    int count = (int)flowAccumulator;
+    flowAccumulator -= (float)count;
+    if (count < 0) count = 0;
 
     // if we are going to exceed the maximum particles in 2 steps then we need to start flagging the older particles for deletion
     // DestroyOldestParticle does not delete them immediately
@@ -604,27 +727,28 @@ void LiquidEffect::Step(b2World* world, RenderBuffer &buffer, bool enabled[], in
     int x1, int y1, int direction1, int velocity1, int flow1, int sourceSize1, bool flowMusic1,
     int x2, int y2, int direction2, int velocity2, int flow2, int sourceSize2, bool flowMusic2,
     int x3, int y3, int direction3, int velocity3, int flow3, int sourceSize3, bool flowMusic3,
-    int x4, int y4, int direction4, int velocity4, int flow4, int sourceSize4, bool flowMusic4, float time
+    int x4, int y4, int direction4, int velocity4, int flow4, int sourceSize4, bool flowMusic4, float time,
+    float flowAccumulators[4]
 )
 {
-    // move all existing items
-    // If frame time is 50ms then time advances by 0.05s
-    float32 timeStep = (float)buffer.frameTimeInMs / 1000.0;
+    // dt is the simulation time advanced per Box2D Step call, in
+    // seconds. Box2D uses this to scale all forces and integrations,
+    // so velocity (buf-u/sec) and gravity (buf-u/sec²) produce the
+    // same visual motion regardless of sequence frame rate.
+    float32 timeStep = (float)buffer.frameTimeInMs / 1000.0f;
     int32 velocityIterations = 6;
     int32 positionIterations = 2;
-    // particleIterations controls LiquidFun's per-frame particle solver
-    // sub-stepping. It also gates the internal CFL velocity clamp:
-    //
+    // Adapt particle iterations so the CFL velocity clamp stays at
+    // ~100 buffer-units/sec at any frame rate:
     //   criticalVelocity = particleDiameter * particleIterations / timeStep
-    //
-    // With diameter=1.0 and timeStep=0.05, particleIterations=5 gives a
-    // critical velocity of 100 buffer-units/sec. Combined with the
-    // velocity slider's user/10 scaling, the full slider range
-    // (0-1000 → physical 0-100) is now usable with no values stuck at
-    // the clamp. The old value of 3 capped at 60, leaving 600-1000 of
-    // the slider with no proportional effect. CPU cost is ~1.67× the
-    // particle solver only
-    int32 particleIterations = 5;
+    // With diameter = 1.0, choose particleIterations = ceil(timeStep × 100).
+    //   20fps (0.050s) → 5
+    //   40fps (0.025s) → 3
+    //   60fps (0.0167s) → 2
+    //   100fps (0.010s) → 1
+    // CPU cost stays roughly constant per second of simulation: at
+    // higher fps each frame is cheaper but there are more frames.
+    int32 particleIterations = std::max(1, (int)std::ceil(timeStep * 100.0f));
     world->Step(timeStep, velocityIterations, positionIterations, particleIterations);
 
     // create new particles
@@ -646,16 +770,16 @@ void LiquidEffect::Step(b2World* world, RenderBuffer &buffer, bool enabled[], in
 
                 switch (i) {
                 case 0:
-                    CreateParticles(ps, x1, y1, direction1, velocity1, flow1, flowMusic1, lifetime, buffer.BufferWi, buffer.BufferHt, color, particleType, mixcolors, audioLevel, sourceSize1);
+                    CreateParticles(ps, x1, y1, direction1, velocity1, flow1, flowMusic1, lifetime, buffer.BufferWi, buffer.BufferHt, color, particleType, mixcolors, audioLevel, sourceSize1, flowAccumulators[0], timeStep);
                     break;
                 case 1:
-                    CreateParticles(ps, x2, y2, direction2, velocity2, flow2, flowMusic2, lifetime, buffer.BufferWi, buffer.BufferHt, color, particleType, mixcolors, audioLevel, sourceSize2);
+                    CreateParticles(ps, x2, y2, direction2, velocity2, flow2, flowMusic2, lifetime, buffer.BufferWi, buffer.BufferHt, color, particleType, mixcolors, audioLevel, sourceSize2, flowAccumulators[1], timeStep);
                     break;
                 case 2:
-                    CreateParticles(ps, x3, y3, direction3, velocity3, flow3, flowMusic3, lifetime, buffer.BufferWi, buffer.BufferHt, color, particleType, mixcolors, audioLevel, sourceSize3);
+                    CreateParticles(ps, x3, y3, direction3, velocity3, flow3, flowMusic3, lifetime, buffer.BufferWi, buffer.BufferHt, color, particleType, mixcolors, audioLevel, sourceSize3, flowAccumulators[2], timeStep);
                     break;
                 case 3:
-                    CreateParticles(ps, x4, y4, direction4, velocity4, flow4, flowMusic4, lifetime, buffer.BufferWi, buffer.BufferHt, color, particleType, mixcolors, audioLevel, sourceSize4);
+                    CreateParticles(ps, x4, y4, direction4, velocity4, flow4, flowMusic4, lifetime, buffer.BufferWi, buffer.BufferHt, color, particleType, mixcolors, audioLevel, sourceSize4, flowAccumulators[3], timeStep);
                     break;
                 }
                 ++j;
@@ -666,7 +790,7 @@ void LiquidEffect::Step(b2World* world, RenderBuffer &buffer, bool enabled[], in
 
 void LiquidEffect::Render(RenderBuffer &buffer,
     bool top, bool bottom, bool left, bool right,
-    int lifetime, bool holdcolor, bool mixcolors, int size, int warmUpFrames,
+    int lifetime, bool holdcolor, bool mixcolors, int size, int warmUpTime,
     bool enabled1, int direction1, int x1, int y1, int velocity1, int flow1, int sourceSize1, bool flowMusic1,
     bool enabled2, int direction2, int x2, int y2, int velocity2, int flow2, int sourceSize2, bool flowMusic2,
     bool enabled3, int direction3, int x3, int y3, int velocity3, int flow3, int sourceSize3, bool flowMusic3,
@@ -715,12 +839,19 @@ void LiquidEffect::Render(RenderBuffer &buffer,
 
         CreateParticleSystem(_world, lifetime, size);
 
+        // Convert warmUpTime (hundredths of seconds) to a frame count
+        // at the current sequence frame rate. e.g. 200 (= 2 sec) at
+        // 50ms = 40 frames; at 25ms = 80 frames. Frame-rate independent.
+        const int warmUpFrames = (buffer.frameTimeInMs > 0)
+            ? (warmUpTime * 10 / buffer.frameTimeInMs)
+            : 0;
         for (int i = 0; i < warmUpFrames; ++i) {
             Step(_world, buffer, enabled, lifetime, particleType, mixcolors,
                 x1, y1, direction1, velocity1, flow1, sourceSize1, flowMusic1,
                 x2, y2, direction2, velocity2, flow2, sourceSize2, flowMusic2,
                 x3, y3, direction3, velocity3, flow3, sourceSize3, flowMusic3,
-                x4, y4, direction4, velocity4, flow4, sourceSize4, flowMusic4, 0.0
+                x4, y4, direction4, velocity4, flow4, sourceSize4, flowMusic4, 0.0,
+                cache->_flowAccumulator
             );
         }
     }
@@ -734,7 +865,8 @@ void LiquidEffect::Render(RenderBuffer &buffer,
         x1, y1, direction1, velocity1, flow1, sourceSize1, flowMusic1,
         x2, y2, direction2, velocity2, flow2, sourceSize2, flowMusic2,
         x3, y3, direction3, velocity3, flow3, sourceSize3, flowMusic3,
-        x4, y4, direction4, velocity4, flow4, sourceSize4, flowMusic4, buffer.GetEffectTimeIntervalPosition()
+        x4, y4, direction4, velocity4, flow4, sourceSize4, flowMusic4, buffer.GetEffectTimeIntervalPosition(),
+        cache->_flowAccumulator
     );
 
     // create new particles

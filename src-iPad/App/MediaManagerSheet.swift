@@ -20,6 +20,11 @@ struct MediaInventoryItem: Identifiable {
     let resolvedPath: String
     let isEmbedded: Bool
     let isBroken: Bool
+    /// Empty when the media is fine, "missing" when the resolved path
+    /// doesn't exist, otherwise the AVFoundation reason (e.g.
+    /// "Unsupported video codec", "Unable to read frames"). Drives
+    /// the status chip + tooltip.
+    let brokenReason: String
     let widthPx: Int
     let heightPx: Int
     let frameCount: Int
@@ -30,7 +35,14 @@ struct MediaInventoryItem: Identifiable {
 
     /// Status label for the trailing chip.
     var statusLabel: String {
-        if isBroken { return "Missing" }
+        if isBroken {
+            // "missing" → file isn't on disk; anything else is the
+            // codec / decode reason returned by the AVFoundation
+            // probe. Showing "Unsupported" reads better in the chip
+            // than the raw probe text — the tooltip / row detail
+            // can carry the specifics later if we add a popover.
+            return brokenReason == "missing" ? "Missing" : "Unsupported"
+        }
         if isEmbedded { return "Embedded" }
         return "External"
     }
@@ -373,6 +385,7 @@ struct MediaManagerContent: View {
                 resolvedPath: (d["resolvedPath"] as? String) ?? "",
                 isEmbedded: (d["isEmbedded"] as? NSNumber)?.boolValue ?? false,
                 isBroken:   (d["isBroken"]   as? NSNumber)?.boolValue ?? false,
+                brokenReason: (d["brokenReason"] as? String) ?? "",
                 widthPx:    (d["widthPx"]    as? NSNumber)?.intValue ?? 0,
                 heightPx:   (d["heightPx"]   as? NSNumber)?.intValue ?? 0,
                 frameCount: (d["frameCount"] as? NSNumber)?.intValue ?? 0)

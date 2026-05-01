@@ -31,6 +31,16 @@ XLIGHTS/NUTCRACKER RELEASE NOTES
                                 the iPad app uses it to drive auto-upload of crash bundles.
     -enh (dkulp)                Liquid effect: velocity slider rescaled to allow full use of range instead of just
                                 values between 0 and 6 providing visual changes
+    -enh (dkulp)                Liquid effect: now frame-rate independent. Sequences imported between different
+                                frame rates render visually the same instead of emitting more particles per second
+                                at higher frame rates. Flow is now particles-per-second; Warm Up Frames renamed to
+                                Warm Up Time (hundredths of a second). Particle solver sub-stepping adapts to the
+                                frame rate. Existing sequences migrate automatically using each sequence's stored
+                                frame interval.
+    -enh (dkulp)                Liquid effect: Flow slider is now non-linear (linear 0-500 to 2000 particles/sec,
+                                exponential 500-1000 to 20000 particles/sec) with a sub-frame accumulator so low
+                                slider values emit occasionally instead of jumping straight from 0 to a constant
+                                stream.
     -enh (dkulp)                Liquid effect: added an Enabled checkbox for particle source 1 (defaults to on)
     -enh (dkulp)                Linux: text rendering switched from wxGraphicsContext (Cairo+Pango) to a portable
                                 FreeType+HarfBuzz+Fontconfig backend in src-core/. Text and Shape effects can now

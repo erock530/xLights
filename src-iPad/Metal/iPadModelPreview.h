@@ -63,6 +63,16 @@ public:
     bool StartDrawing(double pointSize, bool fromPaint = false) override;
     void EndDrawing(bool swapBuffers = true) override;
 
+    /// Reason the most-recent `StartDrawing` returned false. Empty
+    /// when nothing has gone wrong yet (or the last call succeeded).
+    /// XLMetalBridge surfaces this to SwiftUI when it can't draw.
+    const std::string& GetLastStartDrawingFailure() const {
+        return _lastStartDrawingFailure;
+    }
+    /// Public access to the cached preview name — used in log
+    /// prefixes ("XLMetalBridge[ModelPreview]: …").
+    const std::string& GetName() const { return _name; }
+
     double calcPixelSize(double i) override { return i * 2.0; }
 
     // Camera access — callers drive zoom/pan/rotate via the active camera's
@@ -116,4 +126,5 @@ private:
     PreviewCamera _camera2d{false};
     PreviewCamera _camera3d{true};
     std::string _currentModel;  // empty = "render everything" (House Preview mode)
+    std::string _lastStartDrawingFailure;
 };

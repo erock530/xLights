@@ -656,9 +656,14 @@ struct MissingMediaBanner: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill")
+            // "Has issues" covers both shapes: missing files (FileExists
+            // false) and codec-incompatible videos (AVFoundation can't
+            // decode — VP9, AV1, etc.). The Media Manager review sheet
+            // shows the per-entry `brokenReason` so the user knows
+            // which is which.
             Text(count == 1
-                 ? "1 media file is missing"
-                 : "\(count) media files are missing")
+                 ? "1 media file has issues"
+                 : "\(count) media files have issues")
                 .font(.caption)
             Spacer()
             Button("Review", action: onReview)

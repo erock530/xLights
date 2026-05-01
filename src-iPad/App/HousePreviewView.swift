@@ -281,12 +281,28 @@ private struct PreviewContainer: View {
     private var supportsViewObjects: Bool { previewName == "HousePreview" }
     private var supportsIs3D: Bool { previewName == "HousePreview" }
 
+    @State private var status = PreviewStatus()
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             PreviewPaneView(previewName: previewName,
                             previewModelName: previewModelName,
                             controlsVisible: $controlsVisible,
-                            settings: settings)
+                            settings: settings,
+                            status: status)
+
+            // Diagnostic banner — surfaces the bridge's silent-fail
+            // reason after a short grace period so transient init
+            // states (drawable not sized yet, document just loaded)
+            // don't flicker the message. Empty preview-model case
+            // ("No model selected") shows on Model Preview as a
+            // helpful hint rather than a failure.
+            if let banner = status.bannerMessage {
+                PreviewDiagnosticBanner(message: banner,
+                                         hasRendered: status.hasRenderedSuccessfully)
+                    .allowsHitTesting(false)
+                    .padding(16)
+            }
 
             VStack(alignment: .trailing, spacing: 4) {
                 Button {
@@ -616,4 +632,64 @@ extension Notification.Name {
     /// delete). Carries `names: [String]` in userInfo. The overlay
     /// refreshes its menu from this.
     static let previewViewpointListChanged = Notification.Name("PreviewViewpointListChanged")
+}
+
+/// Diagnostic banner painted over the preview pane when the bridge
+/// can't render. Two flavours:
+///
+/// - **Informational** ("No model selected", "No models in active
+///   preview") — shown as a muted hint when `hasRendered == true`,
+///   meaning the pane is drawing fine but there's nothing to show.
+/// - **Failure** ("No CAMetalLayer attached", "Drawable size 0x0
+///   (waiting for layout)", "Metal graphics context invalid (… see
+///   MetalDeviceManager log)") — shown as a warning when
+///   `hasRendered == false`, meaning the pane has never produced a
+///   frame on this device.
+///
+/// In either case the message is also written to spdlog, so iPad
+/// → Tools → Package Logs captures it for tester reports.
+private struct PreviewDiagnosticBanner: View {
+    let message: String
+    let hasRendered: Bool
+
+    /// Failure tone is a warning yellow / red; informational is the
+    /// muted secondary-on-dark scheme used elsewhere in the previews.
+    private var isFailure: Bool { !hasRendered }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: isFailure
+                  ? "exclamationmark.triangle.fill"
+                  : "info.circle.fill")
+                .foregroundStyle(isFailure ? .yellow : .white.opacity(0.8))
+                .imageScale(.medium)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(isFailure ? "Preview unavailable" : "Preview")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white)
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .fixedSize(horizontal: false, vertical: true)
+                if isFailure {
+                    Text("Tools → Package Logs sends details for diagnosis.")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .padding(.top, 2)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.black.opacity(0.7))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke((isFailure ? Color.yellow : .white).opacity(0.4),
+                                lineWidth: 0.5)
+                )
+        )
+        .frame(maxWidth: 380, alignment: .leading)
+    }
 }
